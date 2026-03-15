@@ -2,10 +2,15 @@
 set -e
 
 mkdir -p ~/.nsh
-cat > ~/.nsh/config.toml <<EOF
-provider = "${NSH_PROVIDER:-mock}"
-model = "${NSH_MODEL:-claude-sonnet-4-20250514}"
-EOF
+
+# Build config, only include base_url if set
+{
+    echo "provider = \"${NSH_PROVIDER:-mock}\""
+    echo "model = \"${NSH_MODEL:-claude-sonnet-4-20250514}\""
+    if [[ -n "${NSH_BASE_URL:-}" ]]; then
+        echo "base_url = \"${NSH_BASE_URL}\""
+    fi
+} > ~/.nsh/config.toml
 
 # Start tmux with nsh
 tmux new-session -d -s main -x 120 -y 40 /usr/local/bin/nsh

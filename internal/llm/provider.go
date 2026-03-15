@@ -190,16 +190,21 @@ func (p *AnthropicProvider) Stream(ctx context.Context, messages []Message, tool
 	return ch, nil
 }
 
-// NewProvider creates an LLMClient based on provider name and model.
-func NewProvider(provider, model string) (LLMClient, error) {
+// NewProvider creates an LLMClient based on provider name, model, and optional base URL.
+func NewProvider(provider, model, baseURL string) (LLMClient, error) {
 	switch provider {
 	case "anthropic":
 		return NewAnthropicProvider(model)
 	case "copilot":
 		return nil, fmt.Errorf("copilot provider not yet implemented — use provider = \"anthropic\" with ANTHROPIC_API_KEY")
+	case "ollama":
+		if baseURL == "" {
+			baseURL = "http://localhost:11434/v1"
+		}
+		return NewOpenAICompatProvider(model, baseURL, "nsh"), nil
 	case "mock":
 		return NewMockClient(), nil
 	default:
-		return nil, fmt.Errorf("unsupported provider: %q (supported: anthropic, copilot)", provider)
+		return nil, fmt.Errorf("unsupported provider: %q (supported: anthropic, copilot, ollama)", provider)
 	}
 }

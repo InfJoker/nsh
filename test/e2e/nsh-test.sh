@@ -13,11 +13,13 @@ STATE_FILE="/tmp/nsh-e2e-state"
 cmd_start() {
     local provider="mock"
     local model="claude-sonnet-4-20250514"
+    local base_url=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --provider) provider="$2"; shift 2 ;;
             --model) model="$2"; shift 2 ;;
+            --base-url) base_url="$2"; shift 2 ;;
             *) echo "Unknown flag: $1"; exit 1 ;;
         esac
     done
@@ -25,6 +27,7 @@ cmd_start() {
     # Save state for reset
     echo "provider=$provider" > "$STATE_FILE"
     echo "model=$model" >> "$STATE_FILE"
+    echo "base_url=$base_url" >> "$STATE_FILE"
 
     echo "Building image..."
     docker build -t "$IMAGE" -f "$SCRIPT_DIR/Dockerfile" "$PROJECT_DIR"
@@ -43,6 +46,21 @@ cmd_start() {
             exit 1
         fi
         docker_args+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+    fi
+
+    if [[ "$provider" == "ollama" ]]; then
+        # Default to host's Ollama instance
+        local ollama_url="${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}"
+        base_url="${base_url:-$ollama_url}"
+        docker_args+=(-e "NSH_BASE_URL=$base_url")
+        # On Linux, add host.docker.internal mapping
+        if [[ "$(uname)" == "Linux" ]]; then
+            docker_args+=(--add-host=host.docker.internal:host-gateway)
+        fi
+    fi
+
+    if [[ -n "$base_url" ]]; then
+        docker_args+=(-e "NSH_BASE_URL=$base_url")
     fi
 
     docker_args+=("$IMAGE")
@@ -148,6 +166,9 @@ cmd_reset() {
     if [[ -f "$STATE_FILE" ]]; then
         source "$STATE_FILE"
         args+=(--provider "$provider" --model "$model")
+        if [[ -n "${base_url:-}" ]]; then
+            args+=(--base-url "$base_url")
+        fi
     fi
     cmd_stop
     cmd_start "${args[@]}"
@@ -168,7 +189,7 @@ case "${1:-}" in
         echo "Usage: nsh-test.sh <command> [args]"
         echo ""
         echo "Commands:"
-        echo "  start [--provider mock|anthropic] [--model ...]  Start test container"
+        echo "  start [--provider mock|anthropic|ollama] [--model ...] [--base-url ...]  Start test container"
         echo "  stop                                              Stop test container"
         echo "  type \"text\"                                       Type text into nsh"
         echo "  key Enter|Escape|Tab|Up|Down|C-c|C-d             Send key to nsh"
