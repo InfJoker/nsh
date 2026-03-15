@@ -36,6 +36,7 @@ type Permissions struct {
 type Config struct {
 	Provider    string      `toml:"provider"`
 	Model       string      `toml:"model"`
+	BaseURL     string      `toml:"base_url"`
 	Theme       string      `toml:"theme"`
 	Shell       string      `toml:"shell"`
 	MaxSteps    int         `toml:"max_steps"`
@@ -151,10 +152,16 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
-// SaveProvider writes the provider and model to the config file.
+// SaveProvider writes the provider, model, and base_url to the config file.
 func (c *Config) SaveProvider(provider, model string) error {
+	return c.SaveProviderFull(provider, model, "")
+}
+
+// SaveProviderFull writes the provider, model, and base_url to the config file.
+func (c *Config) SaveProviderFull(provider, model, baseURL string) error {
 	c.Provider = provider
 	c.Model = model
+	c.BaseURL = baseURL
 
 	configPath := filepath.Join(NshDir(), "config.toml")
 	data, err := os.ReadFile(configPath)
@@ -166,7 +173,7 @@ func (c *Config) SaveProvider(provider, model string) error {
 	// Replace the provider/model lines — match exact key names only
 	lines := strings.Split(content, "\n")
 	var result []string
-	providerSet, modelSet := false, false
+	providerSet, modelSet, baseURLSet := false, false, false
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		// Skip comments
@@ -174,20 +181,26 @@ func (c *Config) SaveProvider(provider, model string) error {
 			result = append(result, line)
 			continue
 		}
-		// Match exact "provider" or "model" key (not "provider_url", "model_version", etc.)
+		// Match exact key names only
 		key := extractTOMLKey(trimmed)
-		if key == "provider" {
+		switch key {
+		case "provider":
 			result = append(result, fmt.Sprintf("provider = %q", provider))
 			providerSet = true
-		} else if key == "model" {
+		case "model":
 			result = append(result, fmt.Sprintf("model = %q", model))
 			modelSet = true
-		} else {
+		case "base_url":
+			if baseURL != "" {
+				result = append(result, fmt.Sprintf("base_url = %q", baseURL))
+			}
+			// else: drop the line (empty base_url)
+			baseURLSet = true
+		default:
 			result = append(result, line)
 		}
 	}
 	if !providerSet {
-		// Insert after any leading comments
 		idx := 0
 		for idx < len(result) && strings.HasPrefix(strings.TrimSpace(result[idx]), "#") {
 			idx++
@@ -201,6 +214,20 @@ func (c *Config) SaveProvider(provider, model string) error {
 			idx++
 		}
 		line := fmt.Sprintf("model = %q", model)
+		result = append(result[:idx], append([]string{line}, result[idx:]...)...)
+	}
+	if !baseURLSet && baseURL != "" {
+		// Insert after model line
+		idx := 0
+		for idx < len(result) {
+			key := extractTOMLKey(strings.TrimSpace(result[idx]))
+			if key == "model" {
+				idx++
+				break
+			}
+			idx++
+		}
+		line := fmt.Sprintf("base_url = %q", baseURL)
 		result = append(result[:idx], append([]string{line}, result[idx:]...)...)
 	}
 
