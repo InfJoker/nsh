@@ -202,9 +202,19 @@ func NewProvider(provider, model, baseURL string) (LLMClient, error) {
 			baseURL = "http://localhost:11434/v1"
 		}
 		return NewOpenAICompatProvider(model, baseURL, "nsh"), nil
+	case "llama.cpp":
+		if baseURL == "" {
+			baseURL = "http://localhost:8484/v1"
+		}
+		return NewOpenAICompatProvider(model, baseURL, "nsh"), nil
+	case "mlx":
+		if baseURL == "" {
+			baseURL = "http://localhost:8484/v1"
+		}
+		return NewOpenAICompatProvider(model, baseURL, "nsh"), nil
 	case "mock":
 		return NewMockClient(), nil
 	default:
-		return nil, fmt.Errorf("unsupported provider: %q (supported: anthropic, copilot, ollama)", provider)
+		return nil, fmt.Errorf("unsupported provider: %q (supported: anthropic, copilot, ollama, llama.cpp)", provider)
 	}
 }

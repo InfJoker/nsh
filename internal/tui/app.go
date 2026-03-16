@@ -3,8 +3,13 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -34,6 +39,34 @@ func (r *ProgramRef) Get() *tea.Program {
 	return r.p.Load()
 }
 
+// ServerRef is a shared holder for a llmfit server *exec.Cmd.
+// Like ProgramRef, it survives bubbletea value copies so both main.go
+// and the TUI's internal Model copy can stop the server on exit.
+type ServerRef struct {
+	mu  sync.Mutex
+	cmd *exec.Cmd
+}
+
+// Set stores the server command, stopping the previous one if any.
+func (r *ServerRef) Set(cmd *exec.Cmd) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cmd != nil {
+		llm.StopServer(r.cmd)
+	}
+	r.cmd = cmd
+}
+
+// Stop stops the running server if any.
+func (r *ServerRef) Stop() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cmd != nil {
+		llm.StopServer(r.cmd)
+		r.cmd = nil
+	}
+}
+
 // conversationEntry is a rendered block in the conversation history.
 type conversationEntry struct {
 	content string
@@ -44,6 +77,20 @@ type permissionState struct {
 	command    string
 	dangerous  bool
 	responseCh chan<- msgs.PermissionResponse
+}
+
+// llamaCppServerReadyMsg signals the llmfit server is ready (or failed).
+type llamaCppServerReadyMsg struct {
+	Model   string
+	BaseURL string
+	Err     error
+}
+
+// mlxServerReadyMsg signals the MLX server is ready (or failed).
+type mlxServerReadyMsg struct {
+	Model   string
+	BaseURL string
+	Err     error
 }
 
 // Model is the root bubbletea model.
@@ -62,17 +109,23 @@ type Model struct {
 
 	entries []conversationEntry
 
-	activeCmd *CommandModel
+	activeCmd      *CommandModel
+	providerSelect *providerSelectState
 
-	busy           bool
-	width, height  int
-	cancelAgent    context.CancelFunc
-	permPrompt     *permissionState
-	execGuard      bool
+	busy            bool
+	width, height   int
+	cancelAgent     context.CancelFunc
+	permPrompt      *permissionState
+	execGuard       bool
+	serverStarting  bool
 
 	// programRef is a shared pointer holder so both the main.go copy
 	// and bubbletea's internal copy of Model reference the same *tea.Program.
 	programRef *ProgramRef
+
+	// llamaServer is a shared holder for the llmfit server process.
+	// Shared between main.go and bubbletea's copy so cleanup works on exit.
+	llamaServer *ServerRef
 }
 
 // NewApp creates the root model.
@@ -93,17 +146,18 @@ func NewApp(
 	input.SetHistory(history.Inputs())
 
 	return Model{
-		cfg:        cfg,
-		env:        env,
-		client:     client,
-		history:    history,
-		theme:      theme,
-		shellPath:  cfg.Shell,
-		projects:   projects,
-		input:      input,
-		stream:     stream,
-		status:     status,
-		programRef: &ProgramRef{}, // shared pointer, survives value copies
+		cfg:         cfg,
+		env:         env,
+		client:      client,
+		history:     history,
+		theme:       theme,
+		shellPath:   cfg.Shell,
+		projects:    projects,
+		input:       input,
+		stream:      stream,
+		status:      status,
+		programRef:  &ProgramRef{},  // shared pointer, survives value copies
+		llamaServer: &ServerRef{},   // shared pointer, survives value copies
 	}
 }
 
@@ -111,6 +165,11 @@ func NewApp(
 // because programRef is a shared pointer allocated in NewApp.
 func (m *Model) SetProgram(p *tea.Program) {
 	m.programRef.Set(p)
+}
+
+// StopLlamaServer stops the running llmfit server. Called from main.go on exit.
+func (m *Model) StopLlamaServer() {
+	m.llamaServer.Stop()
 }
 
 func (m Model) Init() tea.Cmd {
@@ -203,12 +262,128 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case msgs.InteractiveDoneMsg:
 		m.execGuard = false
 		return m, nil
+
+	case msgs.OllamaSetupDoneMsg:
+		m.execGuard = false
+		if msg.Err != nil {
+			errStyle := lipgloss.NewStyle().Foreground(m.theme.Danger)
+			m.entries = append(m.entries, conversationEntry{
+				content: errStyle.Render(fmt.Sprintf("Ollama setup failed: %v", msg.Err)),
+			})
+			return m, nil
+		}
+		return m.applyProviderSwitch("ollama", msg.Model, msg.BaseURL)
+
+	case msgs.LlamaCppSetupDoneMsg:
+		m.execGuard = false
+		if msg.Err != nil {
+			errStyle := lipgloss.NewStyle().Foreground(m.theme.Danger)
+			m.entries = append(m.entries, conversationEntry{
+				content: errStyle.Render(fmt.Sprintf("llama.cpp setup failed: %v", msg.Err)),
+			})
+			return m, nil
+		}
+		// Start server asynchronously via tea.Cmd to avoid blocking Update
+		model := msg.Model
+		serverRef := m.llamaServer
+		infoStyle := lipgloss.NewStyle().Foreground(m.theme.Muted)
+		m.entries = append(m.entries, conversationEntry{
+			content: infoStyle.Render("Starting llmfit server..."),
+		})
+		m.serverStarting = true
+		return m, func() tea.Msg {
+			port, err := llm.FindFreePort()
+			if err != nil {
+				return llamaCppServerReadyMsg{Err: fmt.Errorf("finding free port: %w", err)}
+			}
+			baseURL := fmt.Sprintf("http://localhost:%d/v1", port)
+			serverCmd, err := llm.StartLlmfitServer(model, port)
+			if err != nil {
+				return llamaCppServerReadyMsg{Err: fmt.Errorf("starting server: %w", err)}
+			}
+			if err := llm.WaitForServer(baseURL, 30*time.Second); err != nil {
+				llm.StopServer(serverCmd)
+				return llamaCppServerReadyMsg{Err: fmt.Errorf("server not ready: %w", err)}
+			}
+			serverRef.Set(serverCmd)
+			// Query the actual model name the server is serving (may differ from download name)
+			servedModel := model
+			if name, err := llm.QueryServedModel(baseURL); err == nil {
+				servedModel = name
+			}
+			return llamaCppServerReadyMsg{Model: servedModel, BaseURL: baseURL}
+		}
+
+	case llamaCppServerReadyMsg:
+		m.serverStarting = false
+		if msg.Err != nil {
+			errStyle := lipgloss.NewStyle().Foreground(m.theme.Danger)
+			m.entries = append(m.entries, conversationEntry{
+				content: errStyle.Render(fmt.Sprintf("llama.cpp server failed: %v", msg.Err)),
+			})
+			return m, nil
+		}
+		return m.applyProviderSwitch("llama.cpp", msg.Model, msg.BaseURL)
+
+	case msgs.MLXSetupDoneMsg:
+		m.execGuard = false
+		if msg.Err != nil {
+			errStyle := lipgloss.NewStyle().Foreground(m.theme.Danger)
+			m.entries = append(m.entries, conversationEntry{
+				content: errStyle.Render(fmt.Sprintf("MLX setup failed: %v", msg.Err)),
+			})
+			return m, nil
+		}
+		// Start server asynchronously via tea.Cmd
+		model := msg.Model
+		serverRef := m.llamaServer
+		infoStyle := lipgloss.NewStyle().Foreground(m.theme.Muted)
+		m.entries = append(m.entries, conversationEntry{
+			content: infoStyle.Render("Starting MLX server (may download model on first use)..."),
+		})
+		m.serverStarting = true
+		return m, func() tea.Msg {
+			port, err := llm.FindFreePort()
+			if err != nil {
+				return mlxServerReadyMsg{Err: fmt.Errorf("finding free port: %w", err)}
+			}
+			// Use 127.0.0.1 not localhost — mlx_lm binds IPv4 only
+			baseURL := fmt.Sprintf("http://127.0.0.1:%d/v1", port)
+			serverCmd, err := llm.StartMlxServer(model, port)
+			if err != nil {
+				return mlxServerReadyMsg{Err: fmt.Errorf("starting server: %w", err)}
+			}
+			// MLX may download the model on first run — use longer timeout
+			if err := llm.WaitForServer(baseURL, time.Hour); err != nil {
+				llm.StopServer(serverCmd)
+				return mlxServerReadyMsg{Err: fmt.Errorf("server not ready: %w", err)}
+			}
+			serverRef.Set(serverCmd)
+			// Don't use QueryServedModel for MLX — it lists all cached models,
+			// not just the active one, so Data[0] may be wrong.
+			return mlxServerReadyMsg{Model: model, BaseURL: baseURL}
+		}
+
+	case mlxServerReadyMsg:
+		m.serverStarting = false
+		if msg.Err != nil {
+			errStyle := lipgloss.NewStyle().Foreground(m.theme.Danger)
+			m.entries = append(m.entries, conversationEntry{
+				content: errStyle.Render(fmt.Sprintf("MLX server failed: %v", msg.Err)),
+			})
+			return m, nil
+		}
+		return m.applyProviderSwitch("mlx", msg.Model, msg.BaseURL)
 	}
 
 	return m, nil
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.providerSelect != nil {
+		return m.handleProviderSelectKey(msg)
+	}
+
 	if m.permPrompt != nil {
 		return m.handlePermissionKey(msg)
 	}
@@ -266,7 +441,156 @@ func (m Model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleProviderSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	ps := m.providerSelect
+	key := msg.Key()
+
+	switch {
+	case key.Code == tea.KeyUp:
+		if ps.cursor > 0 {
+			ps.cursor--
+		}
+	case key.Code == tea.KeyDown:
+		if ps.cursor < len(ps.providers)-1 {
+			ps.cursor++
+		}
+	case key.Code == tea.KeyEnter:
+		sel := ps.selected()
+		if sel == nil {
+			return m, nil
+		}
+		// Ollama always gets the interactive setup (install + model selection)
+		if sel.Name == "ollama" {
+			m.providerSelect = nil
+			m.execGuard = true
+			return m, launchOllamaSetup()
+		}
+		// llama.cpp always gets the interactive setup (llmfit + download)
+		if sel.Name == "llama.cpp" {
+			m.providerSelect = nil
+			m.execGuard = true
+			return m, launchLlamaCppSetup()
+		}
+		// MLX always gets the interactive setup (mlx-lm + model selection)
+		if sel.Name == "mlx" {
+			m.providerSelect = nil
+			m.execGuard = true
+			return m, launchMLXSetup()
+		}
+		if !sel.Available {
+			return m, nil
+		}
+		return m.applyProviderSwitch(sel.Name, sel.Model, sel.BaseURL)
+	case key.Code == tea.KeyEscape || (key.Code == 'c' && key.Mod&tea.ModCtrl != 0):
+		m.providerSelect = nil
+	}
+
+	return m, nil
+}
+
+func (m Model) applyProviderSwitch(name, model, baseURL string) (tea.Model, tea.Cmd) {
+	newClient, err := llm.NewProvider(name, model, baseURL)
+	if err != nil {
+		errStyle := lipgloss.NewStyle().Foreground(m.theme.Danger)
+		m.entries = append(m.entries, conversationEntry{
+			content: errStyle.Render(fmt.Sprintf("Failed to switch provider: %v", err)),
+		})
+		m.providerSelect = nil
+		return m, nil
+	}
+	// Stop previous local server if switching away
+	if name != "llama.cpp" && name != "mlx" {
+		m.llamaServer.Stop()
+	}
+	m.client = newClient
+	m.cfg.SaveProviderFull(name, model, baseURL)
+	m.status.SetModel(model)
+	m.history.Clear()
+	m.entries = nil
+	m.stream.Reset()
+
+	okStyle := lipgloss.NewStyle().Foreground(m.theme.Success)
+	m.entries = append(m.entries, conversationEntry{
+		content: okStyle.Render(fmt.Sprintf("Switched to %s (%s)", name, model)),
+	})
+	m.providerSelect = nil
+	return m, nil
+}
+
+// launchOllamaSetup runs the ollama setup flow as a subprocess via tea.ExecProcess.
+func launchOllamaSetup() tea.Cmd {
+	resultFile := filepath.Join(os.TempDir(), fmt.Sprintf("nsh-ollama-setup-%d", os.Getpid()))
+	self, _ := os.Executable()
+	c := exec.Command(self, "--ollama-setup", resultFile)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		defer os.Remove(resultFile)
+		if err != nil {
+			return msgs.OllamaSetupDoneMsg{Err: err}
+		}
+		data, err := os.ReadFile(resultFile)
+		if err != nil {
+			return msgs.OllamaSetupDoneMsg{Err: fmt.Errorf("reading setup result: %w", err)}
+		}
+		lines := strings.SplitN(string(data), "\n", 3)
+		if len(lines) < 2 {
+			return msgs.OllamaSetupDoneMsg{Err: fmt.Errorf("unexpected setup result")}
+		}
+		return msgs.OllamaSetupDoneMsg{Model: lines[0], BaseURL: lines[1]}
+	})
+}
+
+// launchLlamaCppSetup runs the llama.cpp setup flow as a subprocess via tea.ExecProcess.
+// The subprocess only handles model selection/download. Port allocation and server startup
+// happen in the parent process to avoid TOCTOU races.
+func launchLlamaCppSetup() tea.Cmd {
+	resultFile := filepath.Join(os.TempDir(), fmt.Sprintf("nsh-llamacpp-setup-%d", os.Getpid()))
+	self, _ := os.Executable()
+	c := exec.Command(self, "--llamacpp-setup", resultFile)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		defer os.Remove(resultFile)
+		if err != nil {
+			return msgs.LlamaCppSetupDoneMsg{Err: err}
+		}
+		data, err := os.ReadFile(resultFile)
+		if err != nil {
+			return msgs.LlamaCppSetupDoneMsg{Err: fmt.Errorf("reading setup result: %w", err)}
+		}
+		model := strings.TrimSpace(string(data))
+		if model == "" {
+			return msgs.LlamaCppSetupDoneMsg{Err: fmt.Errorf("no model selected")}
+		}
+		return msgs.LlamaCppSetupDoneMsg{Model: model}
+	})
+}
+
+// launchMLXSetup runs the MLX setup flow as a subprocess via tea.ExecProcess.
+// The subprocess only handles model selection. Port allocation and server startup
+// happen in the parent process.
+func launchMLXSetup() tea.Cmd {
+	resultFile := filepath.Join(os.TempDir(), fmt.Sprintf("nsh-mlx-setup-%d", os.Getpid()))
+	self, _ := os.Executable()
+	c := exec.Command(self, "--mlx-setup", resultFile)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		defer os.Remove(resultFile)
+		if err != nil {
+			return msgs.MLXSetupDoneMsg{Err: err}
+		}
+		data, err := os.ReadFile(resultFile)
+		if err != nil {
+			return msgs.MLXSetupDoneMsg{Err: fmt.Errorf("reading setup result: %w", err)}
+		}
+		model := strings.TrimSpace(string(data))
+		if model == "" {
+			return msgs.MLXSetupDoneMsg{Err: fmt.Errorf("no model selected")}
+		}
+		return msgs.MLXSetupDoneMsg{Model: model}
+	})
+}
+
 func (m Model) submitInput() (tea.Model, tea.Cmd) {
+	if m.serverStarting {
+		return m, nil
+	}
 	input := strings.TrimSpace(m.input.Value())
 	if input == "" {
 		return m, nil
@@ -284,6 +608,10 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 	switch dispatch.Type {
 	case shell.InputBuiltin:
 		result := shell.ExecBuiltin(m.env, dispatch.Command)
+		if result.IsProviderSwitch {
+			m.providerSelect = newProviderSelectState()
+			return m, nil
+		}
 		if result.Output != "" {
 			m.entries = append(m.entries, conversationEntry{content: result.Output})
 		}
@@ -411,6 +739,10 @@ func (m Model) View() tea.View {
 
 	if m.permPrompt != nil {
 		sb.WriteString(m.renderPermissionPrompt())
+	}
+
+	if m.providerSelect != nil {
+		sb.WriteString(renderProviderSelect(m.providerSelect, m.theme))
 	}
 
 	if !m.busy || m.permPrompt != nil {

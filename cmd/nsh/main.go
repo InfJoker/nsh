@@ -5,10 +5,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
-	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"golang.org/x/term"
@@ -28,6 +29,51 @@ func main() {
 	if len(os.Args) >= 3 && os.Args[1] == "--exec" {
 		query := strings.Join(os.Args[2:], " ")
 		runExec(query)
+		return
+	}
+
+	// Hidden flag: --ollama-setup <resultfile> (used by TUI provider switch via tea.ExecProcess)
+	if len(os.Args) >= 3 && os.Args[1] == "--ollama-setup" {
+		resultFile := os.Args[2]
+		result, err := llm.RunOllamaSetup()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %v\n", err)
+			os.Exit(1)
+		}
+		// Write result for the TUI to read back
+		os.WriteFile(resultFile, []byte(result.Model+"\n"+result.BaseURL+"\n"), 0600)
+		fmt.Println("\n  Press Enter to return to nsh...")
+		bufio.NewReader(os.Stdin).ReadByte()
+		return
+	}
+
+	// Hidden flag: --llamacpp-setup <resultfile> (used by TUI provider switch via tea.ExecProcess)
+	if len(os.Args) >= 3 && os.Args[1] == "--llamacpp-setup" {
+		resultFile := os.Args[2]
+		result, err := llm.RunLlamaCppSetup()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %v\n", err)
+			os.Exit(1)
+		}
+		// Write only the model name — port allocation happens in the parent process
+		os.WriteFile(resultFile, []byte(result.Model+"\n"), 0600)
+		fmt.Println("\n  Press Enter to return to nsh...")
+		bufio.NewReader(os.Stdin).ReadByte()
+		return
+	}
+
+	// Hidden flag: --mlx-setup <resultfile> (used by TUI provider switch via tea.ExecProcess)
+	if len(os.Args) >= 3 && os.Args[1] == "--mlx-setup" {
+		resultFile := os.Args[2]
+		result, err := llm.RunMLXSetup()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %v\n", err)
+			os.Exit(1)
+		}
+		// Write only the model name (HF repo ID) — port allocation happens in the parent process
+		os.WriteFile(resultFile, []byte(result.Model+"\n"), 0600)
+		fmt.Println("\n  Press Enter to return to nsh...")
+		bufio.NewReader(os.Stdin).ReadByte()
 		return
 	}
 
@@ -71,7 +117,64 @@ func main() {
 	history := agent.NewHistory()
 	history.LoadInputHistory()
 
-	// 7. Create LLM client
+	// 7. For local providers, start the server before creating the client
+	var llamaServerCmd *exec.Cmd
+	var mlxServerCmd *exec.Cmd
+
+	if cfg.Provider == "mlx" {
+		port, err := llm.FindFreePort()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", err)
+			os.Exit(1)
+		}
+		// Use 127.0.0.1 not localhost — mlx_lm binds IPv4 only,
+		// and Go may resolve localhost to ::1 (IPv6).
+		cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
+
+		fmt.Fprintf(os.Stderr, "Starting MLX server for %s on port %d...\n", cfg.Model, port)
+		mlxServerCmd, err = llm.StartMlxServer(cfg.Model, port)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting MLX server: %v\n", err)
+			os.Exit(1)
+		}
+		// MLX may download the model on first run — use longer timeout
+		if err := llm.WaitForServer(cfg.BaseURL, time.Hour); err != nil {
+			llm.StopServer(mlxServerCmd)
+			fmt.Fprintf(os.Stderr, "MLX server did not become ready: %v\n", err)
+			os.Exit(1)
+		}
+		// Don't use QueryServedModel for MLX — it lists all cached models,
+		// not just the active one, so Data[0] may be wrong.
+		fmt.Fprintln(os.Stderr, "MLX server ready")
+	}
+
+	if cfg.Provider == "llama.cpp" {
+		port, err := llm.FindFreePort()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", err)
+			os.Exit(1)
+		}
+		cfg.BaseURL = fmt.Sprintf("http://localhost:%d/v1", port)
+
+		fmt.Fprintf(os.Stderr, "Starting llmfit server for %s on port %d...\n", cfg.Model, port)
+		llamaServerCmd, err = llm.StartLlmfitServer(cfg.Model, port)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting llmfit server: %v\n", err)
+			os.Exit(1)
+		}
+		if err := llm.WaitForServer(cfg.BaseURL, 30*time.Second); err != nil {
+			llm.StopServer(llamaServerCmd)
+			fmt.Fprintf(os.Stderr, "llmfit server did not become ready: %v\n", err)
+			os.Exit(1)
+		}
+		// Query the actual model name the server is serving (may differ from download name)
+		if servedModel, err := llm.QueryServedModel(cfg.BaseURL); err == nil {
+			cfg.Model = servedModel
+		}
+		fmt.Fprintln(os.Stderr, "llmfit server ready")
+	}
+
+	// 8. Create LLM client
 	client, err := llm.NewProvider(cfg.Provider, cfg.Model, cfg.BaseURL)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating LLM client: %v\n", err)
@@ -79,7 +182,7 @@ func main() {
 		client = llm.NewMockClient()
 	}
 
-	// 8. Create TUI model and program
+	// 9. Create TUI model and program
 	model := tui.NewApp(cfg, env, client, history, projects)
 	p := tea.NewProgram(model)
 
@@ -91,7 +194,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 9. Cleanup: save state
+	// Cleanup local servers on exit (both startup-started and TUI-started)
+	if llamaServerCmd != nil {
+		llm.StopServer(llamaServerCmd)
+	}
+	if mlxServerCmd != nil {
+		llm.StopServer(mlxServerCmd)
+	}
+	model.StopLlamaServer()
+
+	// 10. Cleanup: save state
 	if err := history.SaveInputHistory(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to save history: %v\n", err)
 	}
@@ -120,6 +232,55 @@ func runExec(query string) {
 	if cfg.Provider == "ollama" && !llm.DetectOllama("") {
 		fmt.Fprintln(os.Stderr, "Ollama not running. Start it with: ollama serve")
 		os.Exit(1)
+	}
+
+	// For MLX in exec mode, start server, defer cleanup
+	if cfg.Provider == "mlx" {
+		port, portErr := llm.FindFreePort()
+		if portErr != nil {
+			fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", portErr)
+			os.Exit(1)
+		}
+		// Use 127.0.0.1 not localhost — mlx_lm binds IPv4 only
+		cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
+		mlxCmd, mlxErr := llm.StartMlxServer(cfg.Model, port)
+		if mlxErr != nil {
+			fmt.Fprintf(os.Stderr, "Error starting MLX server: %v\n", mlxErr)
+			os.Exit(1)
+		}
+		defer llm.StopServer(mlxCmd)
+		if err := llm.WaitForServer(cfg.BaseURL, time.Hour); err != nil {
+			llm.StopServer(mlxCmd)
+			fmt.Fprintf(os.Stderr, "MLX server did not become ready: %v\n", err)
+			os.Exit(1)
+		}
+		// Don't use QueryServedModel for MLX — it lists all cached models
+	}
+
+	// For llama.cpp in exec mode, start server, defer cleanup
+	var execLlamaServer *exec.Cmd
+	if cfg.Provider == "llama.cpp" {
+		port, portErr := llm.FindFreePort()
+		if portErr != nil {
+			fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", portErr)
+			os.Exit(1)
+		}
+		cfg.BaseURL = fmt.Sprintf("http://localhost:%d/v1", port)
+		execLlamaServer, err = llm.StartLlmfitServer(cfg.Model, port)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error starting llmfit server: %v\n", err)
+			os.Exit(1)
+		}
+		defer llm.StopServer(execLlamaServer)
+		if err := llm.WaitForServer(cfg.BaseURL, 30*time.Second); err != nil {
+			llm.StopServer(execLlamaServer)
+			fmt.Fprintf(os.Stderr, "llmfit server did not become ready: %v\n", err)
+			os.Exit(1)
+		}
+		// Query the actual model name the server is serving
+		if servedModel, err := llm.QueryServedModel(cfg.BaseURL); err == nil {
+			cfg.Model = servedModel
+		}
 	}
 
 	client, err := llm.NewProvider(cfg.Provider, cfg.Model, cfg.BaseURL)
@@ -198,7 +359,9 @@ func runProviderSetup(cfg *config.Config) {
 	fmt.Println()
 	fmt.Println("  [1] anthropic  - Anthropic API (requires ANTHROPIC_API_KEY)")
 	fmt.Println("  [2] copilot    - GitHub Copilot (requires Copilot subscription)")
-	fmt.Println("  [3] ollama     - Ollama (local, private)")
+	fmt.Println("  [3] ollama     - Ollama (local, uses already-installed models)")
+	fmt.Println("  [4] llama.cpp  - llama.cpp via llmfit (local, auto-downloads best model)")
+	fmt.Println("  [5] mlx        - MLX on Apple Silicon (local, auto-downloads best model)")
 	fmt.Println()
 
 	reader := bufio.NewReader(os.Stdin)
@@ -238,7 +401,32 @@ func runProviderSetup(cfg *config.Config) {
 
 	case "3", "ollama":
 		provider = "ollama"
-		model, baseURL = runOllamaSetup(reader)
+		result, err := llm.RunOllamaSetup()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %v\n", err)
+			os.Exit(1)
+		}
+		model, baseURL = result.Model, result.BaseURL
+
+	case "4", "llama.cpp":
+		provider = "llama.cpp"
+		result, err := llm.RunLlamaCppSetup()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %v\n", err)
+			os.Exit(1)
+		}
+		model = result.Model
+		// baseURL will be set at startup when the server starts
+
+	case "5", "mlx":
+		provider = "mlx"
+		result, err := llm.RunMLXSetup()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %v\n", err)
+			os.Exit(1)
+		}
+		model = result.Model
+		// baseURL will be set at startup when the server starts
 
 	default:
 		fmt.Fprintf(os.Stderr, "  Unknown choice: %q\n", input)
@@ -259,141 +447,3 @@ func runProviderSetup(cfg *config.Config) {
 	fmt.Println()
 }
 
-// runOllamaSetup handles the Ollama-specific setup sub-flow.
-// Returns the selected model and base URL.
-func runOllamaSetup(reader *bufio.Reader) (model, baseURL string) {
-	baseURL = "http://localhost:11434/v1"
-	ollamaBase := "http://localhost:11434"
-
-	// Step 1: Ensure Ollama is installed and running
-	if !llm.DetectOllama("") {
-		if !llm.OllamaInstalled() {
-			if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-				fmt.Println()
-				fmt.Println("  Ollama is not available on this platform.")
-				fmt.Println("  Install manually: https://ollama.com/download")
-				os.Exit(1)
-			}
-
-			fmt.Println()
-			fmt.Println("  Ollama not found.")
-			fmt.Println("  Install now? This will run: curl -fsSL https://ollama.com/install.sh | sh")
-			fmt.Printf("  [Y/n]: ")
-			ans, _ := reader.ReadString('\n')
-			ans = strings.TrimSpace(strings.ToLower(ans))
-			if ans != "" && ans != "y" && ans != "yes" {
-				fmt.Println("  Skipped. Install Ollama manually: https://ollama.com/download")
-				os.Exit(0)
-			}
-
-			fmt.Println()
-			fmt.Println("  Installing Ollama...")
-			if err := llm.InstallOllama(); err != nil {
-				fmt.Fprintf(os.Stderr, "  Error installing Ollama: %v\n", err)
-				os.Exit(1)
-			}
-			fmt.Println("  ✓ Ollama installed")
-		}
-
-		// Ollama installed but not running
-		fmt.Println("  Starting Ollama...")
-		if err := llm.StartOllama(); err != nil {
-			fmt.Fprintf(os.Stderr, "  Error starting Ollama: %v\n", err)
-			fmt.Fprintln(os.Stderr, "  Try running: ollama serve")
-			os.Exit(1)
-		}
-		fmt.Println("  ✓ Ollama ready")
-	}
-
-	// Step 2: List models and filter by tool-calling capability
-	models, err := llm.ListOllamaModels(ollamaBase)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "  Error listing models: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Filter to tool-capable models
-	type modelEntry struct {
-		name string
-		size int64
-	}
-	var toolCapable []modelEntry
-	for _, m := range models {
-		if llm.ModelSupportsTools(ollamaBase, m.Name) {
-			toolCapable = append(toolCapable, modelEntry{name: m.Name, size: m.Size})
-		}
-	}
-
-	// Step 3: If no tool-capable models, try llmfit recommendations or suggest a default
-	if len(toolCapable) == 0 {
-		fmt.Println()
-		fmt.Println("  No tool-calling capable models found.")
-
-		// Try llmfit for recommendations
-		suggestedModel := "qwen2.5:7b" // sensible default
-		if err := llm.EnsureLlmfit(); err == nil {
-			fmt.Println("  Analyzing your hardware...")
-			recs, err := llm.RecommendModels(ollamaBase)
-			if err == nil && len(recs) > 0 {
-				suggestedModel = recs[0].Name
-				fmt.Println()
-				fmt.Println("  Recommended models (via llmfit, filtered for tool-calling):")
-				for i, r := range recs {
-					marker := ""
-					if i == 0 {
-						marker = "  * best fit"
-					}
-					fmt.Printf("    [%d] %-20s (score: %.0f)%s\n", i+1, r.Name, r.Score, marker)
-				}
-				fmt.Println()
-			}
-		}
-
-		fmt.Printf("  Pull and use %s? [Y/n]: ", suggestedModel)
-		ans, _ := reader.ReadString('\n')
-		ans = strings.TrimSpace(strings.ToLower(ans))
-		if ans != "" && ans != "y" && ans != "yes" {
-			fmt.Println("  Pull a model manually: ollama pull <model>")
-			os.Exit(0)
-		}
-
-		fmt.Println()
-		fmt.Printf("  Pulling %s...\n", suggestedModel)
-		if err := llm.PullModel(suggestedModel); err != nil {
-			fmt.Fprintf(os.Stderr, "  Error pulling model: %v\n", err)
-			os.Exit(1)
-		}
-		model = suggestedModel
-		return model, baseURL
-	}
-
-	// Step 4: Show available tool-capable models, let user pick
-	fmt.Println()
-	fmt.Println("  Available models (tool-calling capable):")
-	for i, m := range toolCapable {
-		sizeGB := float64(m.size) / (1024 * 1024 * 1024)
-		marker := ""
-		if i == 0 {
-			marker = "  * recommended"
-		}
-		fmt.Printf("    [%d] %-20s (%.1f GB)%s\n", i+1, m.name, sizeGB, marker)
-	}
-	fmt.Println()
-
-	fmt.Printf("  Enter model [1]: ")
-	ans, _ := reader.ReadString('\n')
-	ans = strings.TrimSpace(ans)
-	if ans == "" {
-		ans = "1"
-	}
-
-	idx := 0
-	if _, err := fmt.Sscanf(ans, "%d", &idx); err != nil || idx < 1 || idx > len(toolCapable) {
-		// Try as model name
-		model = ans
-	} else {
-		model = toolCapable[idx-1].name
-	}
-
-	return model, baseURL
-}

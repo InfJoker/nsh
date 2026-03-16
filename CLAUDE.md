@@ -90,6 +90,33 @@ Interactive TUI testing using `test/e2e/nsh-test.sh` — a Playwright-like CLI t
 - `~/.nsh/data/` — history.json, projects.json, auth.json, learned_rules.toml
 
 ## Supported Providers
-- `anthropic` — requires `ANTHROPIC_API_KEY` env var
-- `copilot` — GitHub Copilot OAuth (not yet implemented)
-- `mock` — for development/testing
+
+| Provider | Model selection | Runtime |
+|---|---|---|
+| `anthropic` | Fixed (claude-sonnet) | Anthropic API (requires `ANTHROPIC_API_KEY`) |
+| `ollama` | Only shows locally-installed tool-capable models | Ollama daemon (must be running) |
+| `llama.cpp` | llmfit recommends for hardware → download → serve | llmfit + llama-server |
+| `copilot` | Fixed (not yet implemented) | GitHub Copilot OAuth |
+| `mlx` | llmfit recommends for Apple Silicon | mlx_lm.server (requires `pip3 install mlx-lm`) |
+| `mock` | Fixed | Built-in (for development/testing) |
+
+### Ollama Provider
+- **Simple**: only lists models already pulled locally. No recommendations, no downloads.
+- Users manage ollama models themselves (`ollama pull <model>`).
+- `!provider` builtin triggers interactive setup that shows tool-capable local models.
+
+### llama.cpp Provider
+- **Smart local option**: llmfit handles hardware detection, model recommendation, downloading with optimal quantization, and serving.
+- Server lifecycle: `llmfit run <model> --server --port <port>` starts/stops with nsh.
+- Auto port: `FindFreePort()` binds `:0` for OS-assigned ephemeral port.
+- No name mapping: llmfit download name = serve name = API model name.
+- `internal/llm/llmfit_local.go` — runtime management (install, download, serve, port, wait).
+
+### llmfit Integration (llama.cpp only)
+- Use `llmfit list --json` to query the model database, filter by `capabilities: ["tool_use"]` + `gguf_sources` (non-empty) + RAM fit.
+- Use `llmfit recommend --json` for hardware detection (`system.total_ram_gb`, `system.gpu_vram_gb`, `system.unified_memory`).
+- `llmfit` output format: `{"models": [...], "system": {...}}` for `recommend`; top-level array for `list`.
+
+## Development Guidelines
+- **No hardcoded model catalogs.** Model availability changes frequently. Always query llmfit or ollama APIs at runtime.
+- **Interactive I/O in `internal/llm/`**: The `llm` package contains `RunOllamaSetup()` and `RunLlamaCppSetup()` which do interactive stdin/stdout. When called from the TUI, they must run via `tea.ExecProcess` (subprocess) to avoid conflicting with bubbletea's terminal control.

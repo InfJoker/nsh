@@ -1,13 +1,34 @@
 package llm
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 )
+
+// isOOMError checks if an error message indicates a GPU out-of-memory condition.
+func isOOMError(errStr string) bool {
+	lower := strings.ToLower(errStr)
+	return strings.Contains(lower, "compute error") ||
+		strings.Contains(lower, "out of memory") ||
+		strings.Contains(lower, "outofmemory") ||
+		strings.Contains(lower, "kIOGPUCommandBufferCallbackErrorOutOfMemory")
+}
+
+// oomUserError returns a user-friendly error for GPU OOM conditions.
+func oomUserError() error {
+	return fmt.Errorf("model ran out of GPU memory during inference.\n" +
+		"Try a smaller quantization (e.g. Q4_K_M instead of Q8_0) or a smaller model.\n" +
+		"Run !provider to switch models.")
+}
 
 // OpenAICompatProvider implements LLMClient for any OpenAI-compatible API.
 // Used by Ollama now; reusable for OpenRouter, Groq, etc.
@@ -21,11 +42,76 @@ func NewOpenAICompatProvider(model, baseURL, apiKey string) *OpenAICompatProvide
 	client := openai.NewClient(
 		option.WithBaseURL(baseURL),
 		option.WithAPIKey(apiKey),
+		option.WithMiddleware(sseFilterMiddleware),
 	)
 	return &OpenAICompatProvider{
 		client: client,
 		model:  model,
 	}
+}
+
+// sseFilterMiddleware strips SSE comment lines (starting with ":") from streaming
+// responses. Some servers (e.g. mlx_lm) send ": keepalive" comments that the
+// openai-go SDK doesn't handle, causing "unexpected end of JSON input" errors.
+func sseFilterMiddleware(req *http.Request, next option.MiddlewareNext) (*http.Response, error) {
+	resp, err := next(req)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.Contains(ct, "text/event-stream") {
+		return resp, nil
+	}
+	resp.Body = &sseCommentFilterReader{reader: bufio.NewReader(resp.Body), body: resp.Body}
+	return resp, nil
+}
+
+// sseCommentFilterReader wraps an SSE stream body, filtering out comment lines
+// (lines starting with ":") that some servers emit.
+type sseCommentFilterReader struct {
+	reader      *bufio.Reader
+	body        io.ReadCloser
+	buf         bytes.Buffer
+	skipComment bool // true after skipping a comment, to also skip the trailing blank line
+}
+
+func (r *sseCommentFilterReader) Read(p []byte) (int, error) {
+	for r.buf.Len() == 0 {
+		line, err := r.reader.ReadBytes('\n')
+		if len(line) > 0 {
+			trimmed := bytes.TrimLeft(line, " \t")
+			if len(trimmed) > 0 && trimmed[0] == ':' {
+				// SSE comment — skip it and the blank line that follows
+				if err != nil {
+					return 0, err
+				}
+				r.skipComment = true
+				continue
+			}
+			// Skip blank lines immediately after a comment to avoid
+			// the SDK interpreting them as empty SSE events.
+			if r.skipComment && len(bytes.TrimSpace(line)) == 0 {
+				r.skipComment = false
+				if err != nil {
+					return 0, err
+				}
+				continue
+			}
+			r.skipComment = false
+			r.buf.Write(line)
+		}
+		if err != nil {
+			if r.buf.Len() > 0 {
+				break
+			}
+			return 0, err
+		}
+	}
+	return r.buf.Read(p)
+}
+
+func (r *sseCommentFilterReader) Close() error {
+	return r.body.Close()
 }
 
 // parseToolCall parses a tool call's JSON arguments into a ToolCall.
@@ -152,8 +238,12 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, messages []Message, t
 		}
 
 		if err := stream.Err(); err != nil {
+			reportErr := err
+			if isOOMError(err.Error()) {
+				reportErr = oomUserError()
+			}
 			select {
-			case ch <- StreamEvent{Type: EventError, Err: err}:
+			case ch <- StreamEvent{Type: EventError, Err: reportErr}:
 			case <-ctx.Done():
 			}
 			return

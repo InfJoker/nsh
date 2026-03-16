@@ -9,9 +9,10 @@ import (
 
 // BuiltinResult holds the result of a built-in command execution.
 type BuiltinResult struct {
-	Output    string
-	NewCwd    string // non-empty if cwd changed
-	IsBuiltin bool
+	Output           string
+	NewCwd           string // non-empty if cwd changed
+	IsBuiltin        bool
+	IsProviderSwitch bool // true if TUI should show provider selection overlay
 }
 
 // IsBuiltin checks if a command is a built-in without executing it.
@@ -21,7 +22,7 @@ func IsBuiltin(command string) bool {
 		return false
 	}
 	switch parts[0] {
-	case "cd", "export", "unset", "alias", "unalias":
+	case "cd", "export", "unset", "alias", "unalias", "provider":
 		return true
 	}
 	return false
@@ -52,6 +53,8 @@ func ExecBuiltin(env *EnvState, command string) BuiltinResult {
 		return execAlias(env, parts[1:])
 	case "unalias":
 		return execUnalias(env, parts[1:])
+	case "provider":
+		return BuiltinResult{IsBuiltin: true, IsProviderSwitch: true}
 	default:
 		return BuiltinResult{}
 	}
