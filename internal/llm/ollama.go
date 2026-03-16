@@ -3,7 +3,6 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -120,17 +119,20 @@ func StartOllama() error {
 		return fmt.Errorf("starting ollama: %w", err)
 	}
 
-	// Wait for port 11434 to be ready
-	deadline := time.Now().Add(15 * time.Second)
+	// Wait for HTTP API to be fully ready (not just TCP port open)
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", "localhost:11434", 500*time.Millisecond)
+		resp, err := client.Get(defaultOllamaBase + "/api/tags")
 		if err == nil {
-			conn.Close()
-			return nil
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				return nil
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("ollama did not start within 15 seconds")
+	return fmt.Errorf("ollama did not become ready within 30 seconds")
 }
 
 // PullModel runs ollama pull with progress output.
@@ -140,3 +142,4 @@ func PullModel(model string) error {
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
+

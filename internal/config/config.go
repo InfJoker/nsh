@@ -244,7 +244,7 @@ func extractTOMLKey(line string) string {
 }
 
 func defaultConfig() string {
-	return `# provider: anthropic, copilot, or ollama
+	return `# provider: anthropic, copilot, ollama, or llama.cpp
 # Set to "" to be prompted on first run.
 provider = ""
 model = ""

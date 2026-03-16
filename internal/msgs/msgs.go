@@ -50,3 +50,24 @@ type InteractiveDoneMsg struct{ Err error }
 
 // CancelMsg signals the user pressed Ctrl+C.
 type CancelMsg struct{}
+
+// OllamaSetupDoneMsg signals that the ollama setup subprocess finished.
+type OllamaSetupDoneMsg struct {
+	Model   string
+	BaseURL string
+	Err     error
+}
+
+// LlamaCppSetupDoneMsg signals that the llama.cpp setup subprocess finished.
+// Only carries the model name — port allocation and server startup happen in the parent.
+type LlamaCppSetupDoneMsg struct {
+	Model string
+	Err   error
+}
+
+// MLXSetupDoneMsg signals that the MLX setup subprocess finished.
+// Only carries the model name (HF repo ID) — port allocation and server startup happen in the parent.
+type MLXSetupDoneMsg struct {
+	Model string
+	Err   error
+}
