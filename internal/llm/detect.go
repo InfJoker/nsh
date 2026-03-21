@@ -28,7 +28,7 @@ func DetectAvailableProviders() []ProviderInfo {
 			Name:      "anthropic",
 			Available: anthropicAvail,
 			Hint:      hintwhen(!anthropicAvail, "export ANTHROPIC_API_KEY=sk-..."),
-			Model:     "claude-sonnet-4-20250514",
+			Model:     "claude-sonnet-4-6",
 		},
 		{
 			Name:      "ollama",
