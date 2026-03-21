@@ -261,6 +261,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case msgs.InteractiveDoneMsg:
 		m.execGuard = false
+		if msg.Err != nil {
+			errStyle := lipgloss.NewStyle().Foreground(m.theme.Danger)
+			m.entries = append(m.entries, conversationEntry{
+				content: errStyle.Render(fmt.Sprintf("Error: %v", msg.Err)),
+			})
+		}
 		return m, nil
 
 	case msgs.OllamaSetupDoneMsg:

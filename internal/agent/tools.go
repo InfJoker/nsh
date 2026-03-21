@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -200,6 +201,22 @@ func (te *ToolExecutor) execLaunchInteractive(_ context.Context, tc llm.ToolCall
 		return "", fmt.Errorf("launch_interactive: missing command argument")
 	}
 
+	// Pre-check: verify the command binary exists before launching.
+	// launch_interactive uses tea.ExecProcess which gives full terminal control —
+	// if the command doesn't exist, the shell error prints outside the TUI
+	// and corrupts the display. Catch it here and return as a normal tool result.
+	bin := extractBinary(command)
+	if bin != "" {
+		if _, err := exec.LookPath(bin); err != nil {
+			result := fmt.Sprintf("command not found: %s", bin)
+			// Use "run_command" name so the TUI renders a normal command card,
+			// NOT "launch_interactive" which would trigger tea.ExecProcess.
+			te.SendMsg(msgs.ToolCallStartMsg{Name: "run_command", Desc: command})
+			te.SendMsg(msgs.ToolCallDoneMsg{Name: "run_command", Result: result})
+			return result, nil
+		}
+	}
+
 	te.SendMsg(msgs.ToolCallStartMsg{Name: "launch_interactive", Desc: command})
 	return fmt.Sprintf("INTERACTIVE:%s", command), nil
 }
@@ -352,4 +369,17 @@ func GeneratePattern(command string) string {
 	}
 
 	return parts[0] + " *"
+}
+
+// extractBinary returns the first token in a shell command that isn't
+// an env var assignment (KEY=VAL). Returns "" if no binary found.
+func extractBinary(command string) string {
+	for _, tok := range strings.Fields(command) {
+		// Skip env var assignments: contains '=' and doesn't start with - or /
+		if strings.Contains(tok, "=") && tok[0] != '-' && tok[0] != '/' {
+			continue
+		}
+		return tok
+	}
+	return ""
 }
