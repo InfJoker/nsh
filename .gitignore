@@ -3,3 +3,4 @@
 
 # Screenshots from e2e tests
 *.png
+.specs/scratchpad/
