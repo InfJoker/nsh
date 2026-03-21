@@ -17,7 +17,7 @@ type OllamaSetupResult struct {
 
 // LlamaCppSetupResult holds the result of the interactive llama.cpp setup flow.
 type LlamaCppSetupResult struct {
-	Model string
+	Model string // HF repo with optional quant (e.g. "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF:Q4_K_M")
 }
 
 // RunOllamaSetup handles the interactive Ollama install/model selection flow.
@@ -100,8 +100,6 @@ func RunOllamaSetup() (*OllamaSetupResult, error) {
 		fmt.Println("  Pull a tool-capable model manually, e.g.:")
 		fmt.Println("    ollama pull qwen2.5-coder:14b")
 		fmt.Println("    ollama pull llama3.1:8b")
-		fmt.Println()
-		fmt.Println("  Or try the llama.cpp provider for hardware-aware recommendations.")
 		return nil, fmt.Errorf("no tool-capable models installed — pull one with: ollama pull <model>")
 	}
 
@@ -138,84 +136,38 @@ func RunOllamaSetup() (*OllamaSetupResult, error) {
 }
 
 // RunLlamaCppSetup handles the interactive llama.cpp setup flow.
-// It uses llmfit for hardware detection, model recommendation, and downloading.
+// Prompts the user for a HuggingFace GGUF repo. llama-server auto-downloads via --hf-repo.
 // It reads from stdin and writes to stdout — must be called outside the TUI.
 func RunLlamaCppSetup() (*LlamaCppSetupResult, error) {
 	reader := bufio.NewReader(os.Stdin)
 
-	// Step 1: Ensure llmfit is installed
-	if err := EnsureLlmfit(); err != nil {
-		return nil, fmt.Errorf("llmfit required for llama.cpp provider: %w", err)
-	}
-
-	// Step 2: Ensure llama.cpp is installed
+	// Step 1: Ensure llama.cpp is installed
 	if err := EnsureLlamaCpp(); err != nil {
 		return nil, fmt.Errorf("llama.cpp required: %w", err)
 	}
 
-	// Step 3: Detect hardware and recommend models
+	// Step 2: Show suggestions and prompt for model
 	fmt.Println()
-	fmt.Println("  Analyzing your hardware...")
-	hw, err := DetectHardware()
-	if err != nil {
-		return nil, fmt.Errorf("detecting hardware: %w", err)
-	}
-
-	fmt.Printf("  Detected: %s, %.0fGB RAM", hw.CPUName, hw.TotalRAMGB)
-	if hw.UnifiedMemory {
-		fmt.Print(" (unified)")
-	}
+	fmt.Println("  Enter a HuggingFace GGUF model repo.")
+	fmt.Println("  Format: owner/repo:quant (quant defaults to Q4_K_M)")
 	fmt.Println()
-
-	recs := RecommendModels(hw)
-	if len(recs) == 0 {
-		fmt.Println("  No models fit your hardware.")
-		fmt.Printf("  Enter a model name to download: ")
-		ans, _ := reader.ReadString('\n')
-		ans = strings.TrimSpace(ans)
-		if ans == "" {
-			return nil, fmt.Errorf("no model selected")
-		}
-		return downloadModel(reader, ans)
-	}
-
+	fmt.Println("  Popular models for tool-calling:")
+	fmt.Println("    Qwen/Qwen2.5-Coder-14B-Instruct-GGUF       (14B, coding)")
+	fmt.Println("    Qwen/Qwen2.5-Coder-7B-Instruct-GGUF        (7B, coding)")
+	fmt.Println("    Qwen/Qwen2.5-14B-Instruct-GGUF             (14B, general)")
+	fmt.Println("    mistralai/Mistral-Small-24B-Instruct-2501   (24B, general)")
 	fmt.Println()
-	fmt.Println("  Recommended models for your hardware (all support tool-calling):")
+	fmt.Println("  Find more: https://huggingface.co/models?sort=trending&search=GGUF")
+	fmt.Println("  Tools: llmfit recommend, llmchecker — for hardware-aware recommendations")
 	fmt.Println()
-	for i, r := range recs {
-		marker := ""
-		if i == 0 {
-			marker = " *"
-		}
-		quant := r.Quantization
-		if quant == "" {
-			quant = "-"
-		}
-		ctxStr := "-"
-		if r.ContextLength > 0 {
-			ctxStr = fmt.Sprintf("%dK ctx", r.ContextLength/1024)
-		}
-		color := fitColor(r.Fit)
-		fmt.Printf("    %s[%d] %-45s %6s  %-7s  %8s  ~%.1fGB  %-16s  [%s]%s\033[0m\n",
-			color, i+1, r.Name, r.Params, quant, ctxStr, r.RAMRequired, r.Category, r.Fit, marker)
+	fmt.Printf("  Model: ")
+	ans, _ := reader.ReadString('\n')
+	ans = strings.TrimSpace(ans)
+	if ans == "" {
+		return nil, fmt.Errorf("no model selected")
 	}
-	fmt.Println()
-
-	fmt.Printf("  Enter model [1]: ")
-	choice, _ := reader.ReadString('\n')
-	choice = strings.TrimSpace(choice)
-	if choice == "" {
-		choice = "1"
-	}
-
-	idx := 0
-	if _, err := fmt.Sscanf(choice, "%d", &idx); err != nil || idx < 1 || idx > len(recs) {
-		// Treat as a model name
-		return downloadModel(reader, choice)
-	}
-
-	selected := recs[idx-1]
-	return downloadModel(reader, selected.GGUFRepo)
+	fmt.Printf("  ✓ Selected %s (will download on first run)\n", ans)
+	return &LlamaCppSetupResult{Model: ans}, nil
 }
 
 // MLXSetupResult holds the result of the interactive MLX setup flow.
@@ -224,8 +176,7 @@ type MLXSetupResult struct {
 }
 
 // RunMLXSetup handles the interactive MLX provider setup flow.
-// It uses llmfit for hardware detection and model recommendation, then returns
-// the selected HuggingFace model ID. mlx_lm.server auto-downloads on first use.
+// Prompts the user for a HuggingFace MLX model. mlx_lm.server auto-downloads on first use.
 // It reads from stdin and writes to stdout — must be called outside the TUI.
 func RunMLXSetup() (*MLXSetupResult, error) {
 	reader := bufio.NewReader(os.Stdin)
@@ -235,112 +186,27 @@ func RunMLXSetup() (*MLXSetupResult, error) {
 		return nil, fmt.Errorf("mlx-lm required for MLX provider: %w", err)
 	}
 
-	// Step 2: Ensure llmfit is installed (for recommendations)
-	if err := EnsureLlmfit(); err != nil {
-		return nil, fmt.Errorf("llmfit required for model recommendations: %w", err)
-	}
-
-	// Step 3: Detect hardware and recommend models
+	// Step 2: Show suggestions and prompt for model
 	fmt.Println()
-	fmt.Println("  Analyzing your hardware...")
-	hw, err := DetectHardware()
-	if err != nil {
-		return nil, fmt.Errorf("detecting hardware: %w", err)
-	}
-
-	fmt.Printf("  Detected: %s, %.0fGB RAM", hw.CPUName, hw.TotalRAMGB)
-	if hw.UnifiedMemory {
-		fmt.Print(" (unified)")
-	}
+	fmt.Println("  Enter a HuggingFace MLX model repo.")
+	fmt.Println("  Models from mlx-community are pre-quantized for Apple Silicon.")
 	fmt.Println()
-
-	recs := RecommendMLXModels(hw)
-	if len(recs) == 0 {
-		fmt.Println("  No MLX models recommended for your hardware.")
-		fmt.Println("  Enter a HuggingFace model ID (e.g. mlx-community/Qwen2.5-Coder-14B-Instruct-4bit):")
-		fmt.Printf("  > ")
-		ans, _ := reader.ReadString('\n')
-		ans = strings.TrimSpace(ans)
-		if ans == "" {
-			return nil, fmt.Errorf("no model selected")
-		}
-		return &MLXSetupResult{Model: ans}, nil
-	}
-
+	fmt.Println("  Popular models for tool-calling:")
+	fmt.Println("    mlx-community/Qwen2.5-Coder-14B-Instruct-4bit   (14B, coding)")
+	fmt.Println("    mlx-community/Qwen2.5-14B-Instruct-4bit         (14B, general)")
+	fmt.Println("    mlx-community/Qwen2.5-Coder-7B-Instruct-4bit    (7B, coding)")
+	fmt.Println("    mlx-community/Mistral-Small-24B-Instruct-2501-4bit (24B, general)")
 	fmt.Println()
-	fmt.Println("  Recommended models for your hardware (all support tool-calling):")
+	fmt.Println("  Find more: https://huggingface.co/mlx-community")
+	fmt.Println("  Tools: llmfit recommend, llmchecker — for hardware-aware recommendations")
 	fmt.Println()
-	for i, r := range recs {
-		marker := ""
-		if i == 0 {
-			marker = " *"
-		}
-		quant := r.Quantization
-		if quant == "" {
-			quant = "-"
-		}
-		ctxStr := "-"
-		if r.ContextLength > 0 {
-			ctxStr = fmt.Sprintf("%dK ctx", r.ContextLength/1024)
-		}
-		color := fitColor(r.Fit)
-		fmt.Printf("    %s[%d] %-45s %6s  %-7s  %8s  ~%.1fGB  %-16s  [%s]%s\033[0m\n",
-			color, i+1, r.Name, r.Params, quant, ctxStr, r.RAMRequired, r.Category, r.Fit, marker)
+	fmt.Println("  Note: models under 14B often fail to use tools correctly.")
+	fmt.Printf("  Model: ")
+	ans, _ := reader.ReadString('\n')
+	ans = strings.TrimSpace(ans)
+	if ans == "" {
+		return nil, fmt.Errorf("no model selected")
 	}
-	fmt.Println()
-
-	fmt.Printf("  Enter model [1]: ")
-	choice, _ := reader.ReadString('\n')
-	choice = strings.TrimSpace(choice)
-	if choice == "" {
-		choice = "1"
-	}
-
-	idx := 0
-	if _, err := fmt.Sscanf(choice, "%d", &idx); err != nil || idx < 1 || idx > len(recs) {
-		// Treat as a HuggingFace model ID
-		return &MLXSetupResult{Model: choice}, nil
-	}
-
-	selected := recs[idx-1]
-	fmt.Printf("  ✓ Selected %s (will download on first use)\n", selected.Name)
-	return &MLXSetupResult{Model: selected.Name}, nil
-}
-
-// fitColor returns an ANSI escape code to color a row based on fit level.
-func fitColor(fit string) string {
-	switch strings.ToLower(fit) {
-	case "perfect":
-		return "\033[32m" // green
-	case "good":
-		return "\033[33m" // yellow
-	case "tight":
-		return "\033[31m" // red/orange
-	default:
-		return ""
-	}
-}
-
-// downloadModel downloads a model via llmfit, retrying on failure.
-// Uses a loop instead of recursion to avoid unbounded stack growth.
-func downloadModel(reader *bufio.Reader, model string) (*LlamaCppSetupResult, error) {
-	for {
-		fmt.Println()
-		fmt.Printf("  Downloading %s...\n", model)
-		if err := DownloadModel(model); err != nil {
-			fmt.Printf("\n  Download failed: %v\n", err)
-			fmt.Println("  Enter a different model name, or press Enter to abort:")
-			fmt.Printf("  > ")
-			alt, _ := reader.ReadString('\n')
-			alt = strings.TrimSpace(alt)
-			if alt == "" {
-				return nil, fmt.Errorf("download failed: %w", err)
-			}
-			model = alt
-			continue
-		}
-
-		fmt.Printf("  ✓ Downloaded %s\n", model)
-		return &LlamaCppSetupResult{Model: model}, nil
-	}
+	fmt.Printf("  ✓ Selected %s (will download on first use)\n", ans)
+	return &MLXSetupResult{Model: ans}, nil
 }
