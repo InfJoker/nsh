@@ -54,7 +54,11 @@ func EnsureMlxLm() error {
 // mlx_lm.server auto-downloads models from HuggingFace on first use.
 func StartMlxServer(model string, port int) (*exec.Cmd, error) {
 	bin, baseArgs := mlxServerCommand()
-	args := append(baseArgs, "--model", model, "--port", fmt.Sprintf("%d", port))
+	args := append(baseArgs,
+		"--model", model,
+		"--port", fmt.Sprintf("%d", port),
+		"--prompt-cache-bytes", fmt.Sprintf("%d", 2*1024*1024*1024), // ~2GB, caps context at ~40K tokens
+	)
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = nil
 	cmd.Stderr = nil // suppress server logs — they break TUI formatting
