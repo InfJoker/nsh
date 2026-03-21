@@ -117,62 +117,75 @@ func main() {
 	history := agent.NewHistory()
 	history.LoadInputHistory()
 
-	// 7. For local providers, start the server before creating the client
-	var llamaServerCmd *exec.Cmd
-	var mlxServerCmd *exec.Cmd
+	// 7. For local providers, reuse a shared server or start a new one.
+	// Reference-counted via flock — last nsh to exit kills the server.
+	var usingSharedServer bool
 
-	if cfg.Provider == "mlx" {
-		port, err := llm.FindFreePort()
+	if cfg.Provider == "mlx" || cfg.Provider == "llama.cpp" {
+		baseURL, err := llm.AcquireSharedServer(cfg.Provider, cfg.Model)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error acquiring server: %v\n", err)
 			os.Exit(1)
 		}
-		// Use 127.0.0.1 not localhost — mlx_lm binds IPv4 only,
-		// and Go may resolve localhost to ::1 (IPv6).
-		cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
 
-		fmt.Fprintf(os.Stderr, "Starting MLX server for %s on port %d...\n", cfg.Model, port)
-		mlxServerCmd, err = llm.StartMlxServer(cfg.Model, port)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error starting MLX server: %v\n", err)
-			os.Exit(1)
-		}
-		// MLX may download the model on first run — use longer timeout
-		if err := llm.WaitForServer(cfg.BaseURL, time.Hour); err != nil {
-			llm.StopServer(mlxServerCmd)
-			fmt.Fprintf(os.Stderr, "MLX server did not become ready: %v\n", err)
-			os.Exit(1)
-		}
-		// Don't use QueryServedModel for MLX — it lists all cached models,
-		// not just the active one, so Data[0] may be wrong.
-		fmt.Fprintln(os.Stderr, "MLX server ready")
-	}
+		if baseURL != "" {
+			// Reusing existing server (refcount already incremented)
+			cfg.BaseURL = baseURL
+			usingSharedServer = true
+			fmt.Fprintf(os.Stderr, "Reusing %s server for %s\n", cfg.Provider, cfg.Model)
+		} else {
+			// Start a new server
+			port, err := llm.FindFreePort()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", err)
+				os.Exit(1)
+			}
+			cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
 
-	if cfg.Provider == "llama.cpp" {
-		port, err := llm.FindFreePort()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", err)
-			os.Exit(1)
-		}
-		cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
+			fmt.Fprintf(os.Stderr, "Starting %s server for %s on port %d...\n", cfg.Provider, cfg.Model, port)
+			var serverCmd *exec.Cmd
+			if cfg.Provider == "mlx" {
+				serverCmd, err = llm.StartMlxServer(cfg.Model, port)
+			} else {
+				serverCmd, err = llm.StartLlamaServer(cfg.Model, port)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
+				os.Exit(1)
+			}
 
-		fmt.Fprintf(os.Stderr, "Starting llama-server for %s on port %d...\n", cfg.Model, port)
-		llamaServerCmd, err = llm.StartLlamaServer(cfg.Model, port)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error starting llama-server: %v\n", err)
-			os.Exit(1)
+			timeout := 30 * time.Minute
+			if cfg.Provider == "mlx" {
+				timeout = time.Hour
+			}
+			if err := llm.WaitForServer(cfg.BaseURL, timeout); err != nil {
+				llm.StopServer(serverCmd)
+				fmt.Fprintf(os.Stderr, "Server did not become ready: %v\n", err)
+				os.Exit(1)
+			}
+
+			if cfg.Provider == "llama.cpp" {
+				if servedModel, err := llm.QueryServedModel(cfg.BaseURL); err == nil {
+					cfg.Model = servedModel
+				}
+			}
+
+			// Register (or reuse if another process won the race)
+			actualURL, regErr := llm.RegisterSharedServer(&llm.ServerInfo{
+				Provider: cfg.Provider,
+				Model:    cfg.Model,
+				PID:      serverCmd.Process.Pid,
+				Port:     port,
+				BaseURL:  cfg.BaseURL,
+			})
+			if regErr != nil {
+				fmt.Fprintf(os.Stderr, "Error registering server: %v\n", regErr)
+				os.Exit(1)
+			}
+			cfg.BaseURL = actualURL
+			usingSharedServer = true
+			fmt.Fprintln(os.Stderr, "Server ready")
 		}
-		// llama-server may download the model on first run via --hf-repo — use longer timeout
-		if err := llm.WaitForServer(cfg.BaseURL, 30*time.Minute); err != nil {
-			llm.StopServer(llamaServerCmd)
-			fmt.Fprintf(os.Stderr, "llama-server did not become ready: %v\n", err)
-			os.Exit(1)
-		}
-		// Query the actual model name the server is serving (may differ from download name)
-		if servedModel, err := llm.QueryServedModel(cfg.BaseURL); err == nil {
-			cfg.Model = servedModel
-		}
-		fmt.Fprintln(os.Stderr, "llama-server ready")
 	}
 
 	// 8. Create LLM client
@@ -195,14 +208,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Cleanup local servers on exit (both startup-started and TUI-started)
-	if llamaServerCmd != nil {
-		llm.StopServer(llamaServerCmd)
+	// Decrement refcount — if we're the last user, server is killed atomically.
+	if usingSharedServer {
+		llm.ReleaseSharedServer()
 	}
-	if mlxServerCmd != nil {
-		llm.StopServer(mlxServerCmd)
-	}
-	model.StopLlamaServer()
 
 	// 10. Cleanup: save state
 	if err := history.SaveInputHistory(); err != nil {
@@ -235,52 +244,61 @@ func runExec(query string) {
 		os.Exit(1)
 	}
 
-	// For MLX in exec mode, start server, defer cleanup
-	if cfg.Provider == "mlx" {
-		port, portErr := llm.FindFreePort()
-		if portErr != nil {
-			fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", portErr)
+	// For local providers in exec mode, reuse shared server or start one
+	var execUsingShared bool
+	if cfg.Provider == "mlx" || cfg.Provider == "llama.cpp" {
+		baseURL, acquireErr := llm.AcquireSharedServer(cfg.Provider, cfg.Model)
+		if acquireErr != nil {
+			fmt.Fprintf(os.Stderr, "Error acquiring server: %v\n", acquireErr)
 			os.Exit(1)
 		}
-		// Use 127.0.0.1 not localhost — mlx_lm binds IPv4 only
-		cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
-		mlxCmd, mlxErr := llm.StartMlxServer(cfg.Model, port)
-		if mlxErr != nil {
-			fmt.Fprintf(os.Stderr, "Error starting MLX server: %v\n", mlxErr)
-			os.Exit(1)
-		}
-		defer llm.StopServer(mlxCmd)
-		if err := llm.WaitForServer(cfg.BaseURL, time.Hour); err != nil {
-			llm.StopServer(mlxCmd)
-			fmt.Fprintf(os.Stderr, "MLX server did not become ready: %v\n", err)
-			os.Exit(1)
-		}
-		// Don't use QueryServedModel for MLX — it lists all cached models
-	}
-
-	// For llama.cpp in exec mode, start server, defer cleanup
-	var execLlamaServer *exec.Cmd
-	if cfg.Provider == "llama.cpp" {
-		port, portErr := llm.FindFreePort()
-		if portErr != nil {
-			fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", portErr)
-			os.Exit(1)
-		}
-		cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
-		execLlamaServer, err = llm.StartLlamaServer(cfg.Model, port)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error starting llama-server: %v\n", err)
-			os.Exit(1)
-		}
-		defer llm.StopServer(execLlamaServer)
-		if err := llm.WaitForServer(cfg.BaseURL, 30*time.Minute); err != nil {
-			llm.StopServer(execLlamaServer)
-			fmt.Fprintf(os.Stderr, "llama-server did not become ready: %v\n", err)
-			os.Exit(1)
-		}
-		// Query the actual model name the server is serving
-		if servedModel, err := llm.QueryServedModel(cfg.BaseURL); err == nil {
-			cfg.Model = servedModel
+		if baseURL != "" {
+			cfg.BaseURL = baseURL
+			execUsingShared = true
+		} else {
+			port, portErr := llm.FindFreePort()
+			if portErr != nil {
+				fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", portErr)
+				os.Exit(1)
+			}
+			cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
+			var serverCmd *exec.Cmd
+			if cfg.Provider == "mlx" {
+				serverCmd, err = llm.StartMlxServer(cfg.Model, port)
+			} else {
+				serverCmd, err = llm.StartLlamaServer(cfg.Model, port)
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
+				os.Exit(1)
+			}
+			timeout := 30 * time.Minute
+			if cfg.Provider == "mlx" {
+				timeout = time.Hour
+			}
+			if err := llm.WaitForServer(cfg.BaseURL, timeout); err != nil {
+				llm.StopServer(serverCmd)
+				fmt.Fprintf(os.Stderr, "Server did not become ready: %v\n", err)
+				os.Exit(1)
+			}
+			if cfg.Provider == "llama.cpp" {
+				if servedModel, err := llm.QueryServedModel(cfg.BaseURL); err == nil {
+					cfg.Model = servedModel
+				}
+			}
+			actualURL, regErr := llm.RegisterSharedServer(&llm.ServerInfo{
+				Provider: cfg.Provider,
+				Model:    cfg.Model,
+				PID:      serverCmd.Process.Pid,
+				Port:     port,
+				BaseURL:  cfg.BaseURL,
+			})
+			if regErr != nil {
+				fmt.Fprintf(os.Stderr, "Error registering server: %v\n", regErr)
+				os.Exit(1)
+			}
+			cfg.BaseURL = actualURL
+			execUsingShared = true
 		}
 	}
 
@@ -331,6 +349,10 @@ func runExec(query string) {
 	a.SetProjects(projects)
 
 	a.Run(ctx, query)
+
+	if execUsingShared {
+		llm.ReleaseSharedServer()
+	}
 }
 
 // runProviderSetup handles first-time provider selection.
