@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 )
 
 // mlxServerCommand returns the command and args for running mlx_lm.server.
@@ -56,7 +57,9 @@ func StartMlxServer(model string, port int) (*exec.Cmd, error) {
 	args := append(baseArgs, "--model", model, "--port", fmt.Sprintf("%d", port))
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = nil
-	cmd.Stderr = os.Stderr // show download progress and server logs
+	cmd.Stderr = nil // suppress server logs — they break TUI formatting
+	// Create a new process group so StopServer kills the server and any children
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting mlx_lm server: %w", err)
 	}

@@ -40,7 +40,7 @@ func DetectAvailableProviders() []ProviderInfo {
 		{
 			Name:      "llama.cpp",
 			Available: llamaCppAvail,
-			Hint:      hintwhen(!llamaCppAvail, "brew install llmfit llama.cpp"),
+			Hint:      hintwhen(!llamaCppAvail, "brew install llama.cpp"),
 			Model:     "", // determined during interactive setup
 		},
 		{

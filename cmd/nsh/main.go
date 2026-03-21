@@ -154,24 +154,25 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", err)
 			os.Exit(1)
 		}
-		cfg.BaseURL = fmt.Sprintf("http://localhost:%d/v1", port)
+		cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
 
-		fmt.Fprintf(os.Stderr, "Starting llmfit server for %s on port %d...\n", cfg.Model, port)
-		llamaServerCmd, err = llm.StartLlmfitServer(cfg.Model, port)
+		fmt.Fprintf(os.Stderr, "Starting llama-server for %s on port %d...\n", cfg.Model, port)
+		llamaServerCmd, err = llm.StartLlamaServer(cfg.Model, port)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error starting llmfit server: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error starting llama-server: %v\n", err)
 			os.Exit(1)
 		}
-		if err := llm.WaitForServer(cfg.BaseURL, 30*time.Second); err != nil {
+		// llama-server may download the model on first run via --hf-repo — use longer timeout
+		if err := llm.WaitForServer(cfg.BaseURL, 30*time.Minute); err != nil {
 			llm.StopServer(llamaServerCmd)
-			fmt.Fprintf(os.Stderr, "llmfit server did not become ready: %v\n", err)
+			fmt.Fprintf(os.Stderr, "llama-server did not become ready: %v\n", err)
 			os.Exit(1)
 		}
 		// Query the actual model name the server is serving (may differ from download name)
 		if servedModel, err := llm.QueryServedModel(cfg.BaseURL); err == nil {
 			cfg.Model = servedModel
 		}
-		fmt.Fprintln(os.Stderr, "llmfit server ready")
+		fmt.Fprintln(os.Stderr, "llama-server ready")
 	}
 
 	// 8. Create LLM client
@@ -265,16 +266,16 @@ func runExec(query string) {
 			fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", portErr)
 			os.Exit(1)
 		}
-		cfg.BaseURL = fmt.Sprintf("http://localhost:%d/v1", port)
-		execLlamaServer, err = llm.StartLlmfitServer(cfg.Model, port)
+		cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
+		execLlamaServer, err = llm.StartLlamaServer(cfg.Model, port)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error starting llmfit server: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Error starting llama-server: %v\n", err)
 			os.Exit(1)
 		}
 		defer llm.StopServer(execLlamaServer)
-		if err := llm.WaitForServer(cfg.BaseURL, 30*time.Second); err != nil {
+		if err := llm.WaitForServer(cfg.BaseURL, 30*time.Minute); err != nil {
 			llm.StopServer(execLlamaServer)
-			fmt.Fprintf(os.Stderr, "llmfit server did not become ready: %v\n", err)
+			fmt.Fprintf(os.Stderr, "llama-server did not become ready: %v\n", err)
 			os.Exit(1)
 		}
 		// Query the actual model name the server is serving
@@ -360,7 +361,7 @@ func runProviderSetup(cfg *config.Config) {
 	fmt.Println("  [1] anthropic  - Anthropic API (requires ANTHROPIC_API_KEY)")
 	fmt.Println("  [2] copilot    - GitHub Copilot (requires Copilot subscription)")
 	fmt.Println("  [3] ollama     - Ollama (local, uses already-installed models)")
-	fmt.Println("  [4] llama.cpp  - llama.cpp via llmfit (local, auto-downloads best model)")
+	fmt.Println("  [4] llama.cpp  - llama.cpp (local, auto-downloads from HuggingFace)")
 	fmt.Println("  [5] mlx        - MLX on Apple Silicon (local, auto-downloads best model)")
 	fmt.Println()
 

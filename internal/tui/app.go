@@ -39,7 +39,7 @@ func (r *ProgramRef) Get() *tea.Program {
 	return r.p.Load()
 }
 
-// ServerRef is a shared holder for a llmfit server *exec.Cmd.
+// ServerRef is a shared holder for a llama-server *exec.Cmd.
 // Like ProgramRef, it survives bubbletea value copies so both main.go
 // and the TUI's internal Model copy can stop the server on exit.
 type ServerRef struct {
@@ -79,7 +79,7 @@ type permissionState struct {
 	responseCh chan<- msgs.PermissionResponse
 }
 
-// llamaCppServerReadyMsg signals the llmfit server is ready (or failed).
+// llamaCppServerReadyMsg signals the llama-server is ready (or failed).
 type llamaCppServerReadyMsg struct {
 	Model   string
 	BaseURL string
@@ -123,7 +123,7 @@ type Model struct {
 	// and bubbletea's internal copy of Model reference the same *tea.Program.
 	programRef *ProgramRef
 
-	// llamaServer is a shared holder for the llmfit server process.
+	// llamaServer is a shared holder for the llama-server process.
 	// Shared between main.go and bubbletea's copy so cleanup works on exit.
 	llamaServer *ServerRef
 }
@@ -167,7 +167,7 @@ func (m *Model) SetProgram(p *tea.Program) {
 	m.programRef.Set(p)
 }
 
-// StopLlamaServer stops the running llmfit server. Called from main.go on exit.
+// StopLlamaServer stops the running llama-server. Called from main.go on exit.
 func (m *Model) StopLlamaServer() {
 	m.llamaServer.Stop()
 }
@@ -288,7 +288,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		serverRef := m.llamaServer
 		infoStyle := lipgloss.NewStyle().Foreground(m.theme.Muted)
 		m.entries = append(m.entries, conversationEntry{
-			content: infoStyle.Render("Starting llmfit server..."),
+			content: infoStyle.Render("Starting llama-server..."),
 		})
 		m.serverStarting = true
 		return m, func() tea.Msg {
@@ -296,12 +296,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err != nil {
 				return llamaCppServerReadyMsg{Err: fmt.Errorf("finding free port: %w", err)}
 			}
-			baseURL := fmt.Sprintf("http://localhost:%d/v1", port)
-			serverCmd, err := llm.StartLlmfitServer(model, port)
+			baseURL := fmt.Sprintf("http://127.0.0.1:%d/v1", port)
+			serverCmd, err := llm.StartLlamaServer(model, port)
 			if err != nil {
 				return llamaCppServerReadyMsg{Err: fmt.Errorf("starting server: %w", err)}
 			}
-			if err := llm.WaitForServer(baseURL, 30*time.Second); err != nil {
+			// May download model on first use via --hf-repo — use long timeout
+			if err := llm.WaitForServer(baseURL, 30*time.Minute); err != nil {
 				llm.StopServer(serverCmd)
 				return llamaCppServerReadyMsg{Err: fmt.Errorf("server not ready: %w", err)}
 			}
@@ -465,7 +466,7 @@ func (m Model) handleProviderSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.execGuard = true
 			return m, launchOllamaSetup()
 		}
-		// llama.cpp always gets the interactive setup (llmfit + download)
+		// llama.cpp always gets the interactive setup (model selection)
 		if sel.Name == "llama.cpp" {
 			m.providerSelect = nil
 			m.execGuard = true
