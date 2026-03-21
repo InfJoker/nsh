@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -39,33 +38,6 @@ func (r *ProgramRef) Get() *tea.Program {
 	return r.p.Load()
 }
 
-// ServerRef is a shared holder for a llama-server *exec.Cmd.
-// Like ProgramRef, it survives bubbletea value copies so both main.go
-// and the TUI's internal Model copy can stop the server on exit.
-type ServerRef struct {
-	mu  sync.Mutex
-	cmd *exec.Cmd
-}
-
-// Set stores the server command, stopping the previous one if any.
-func (r *ServerRef) Set(cmd *exec.Cmd) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.cmd != nil {
-		llm.StopServer(r.cmd)
-	}
-	r.cmd = cmd
-}
-
-// Stop stops the running server if any.
-func (r *ServerRef) Stop() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.cmd != nil {
-		llm.StopServer(r.cmd)
-		r.cmd = nil
-	}
-}
 
 // conversationEntry is a rendered block in the conversation history.
 type conversationEntry struct {
@@ -79,18 +51,12 @@ type permissionState struct {
 	responseCh chan<- msgs.PermissionResponse
 }
 
-// llamaCppServerReadyMsg signals the llama-server is ready (or failed).
-type llamaCppServerReadyMsg struct {
-	Model   string
-	BaseURL string
-	Err     error
-}
-
-// mlxServerReadyMsg signals the MLX server is ready (or failed).
-type mlxServerReadyMsg struct {
-	Model   string
-	BaseURL string
-	Err     error
+// localServerReadyMsg signals a local server (llama.cpp or MLX) is ready (or failed).
+type localServerReadyMsg struct {
+	Provider string
+	Model    string
+	BaseURL  string
+	Err      error
 }
 
 // Model is the root bubbletea model.
@@ -122,10 +88,6 @@ type Model struct {
 	// programRef is a shared pointer holder so both the main.go copy
 	// and bubbletea's internal copy of Model reference the same *tea.Program.
 	programRef *ProgramRef
-
-	// llamaServer is a shared holder for the llama-server process.
-	// Shared between main.go and bubbletea's copy so cleanup works on exit.
-	llamaServer *ServerRef
 }
 
 // NewApp creates the root model.
@@ -156,8 +118,7 @@ func NewApp(
 		input:       input,
 		stream:      stream,
 		status:      status,
-		programRef:  &ProgramRef{},  // shared pointer, survives value copies
-		llamaServer: &ServerRef{},   // shared pointer, survives value copies
+		programRef: &ProgramRef{}, // shared pointer, survives value copies
 	}
 }
 
@@ -165,11 +126,6 @@ func NewApp(
 // because programRef is a shared pointer allocated in NewApp.
 func (m *Model) SetProgram(p *tea.Program) {
 	m.programRef.Set(p)
-}
-
-// StopLlamaServer stops the running llama-server. Called from main.go on exit.
-func (m *Model) StopLlamaServer() {
-	m.llamaServer.Stop()
 }
 
 func (m Model) Init() tea.Cmd {
@@ -289,48 +245,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		// Start server asynchronously via tea.Cmd to avoid blocking Update
+		// Start or reuse server asynchronously via tea.Cmd
 		model := msg.Model
-		serverRef := m.llamaServer
 		infoStyle := lipgloss.NewStyle().Foreground(m.theme.Muted)
 		m.entries = append(m.entries, conversationEntry{
 			content: infoStyle.Render("Starting llama-server..."),
 		})
 		m.serverStarting = true
 		return m, func() tea.Msg {
-			port, err := llm.FindFreePort()
-			if err != nil {
-				return llamaCppServerReadyMsg{Err: fmt.Errorf("finding free port: %w", err)}
-			}
-			baseURL := fmt.Sprintf("http://127.0.0.1:%d/v1", port)
-			serverCmd, err := llm.StartLlamaServer(model, port)
-			if err != nil {
-				return llamaCppServerReadyMsg{Err: fmt.Errorf("starting server: %w", err)}
-			}
-			// May download model on first use via --hf-repo — use long timeout
-			if err := llm.WaitForServer(baseURL, 30*time.Minute); err != nil {
-				llm.StopServer(serverCmd)
-				return llamaCppServerReadyMsg{Err: fmt.Errorf("server not ready: %w", err)}
-			}
-			serverRef.Set(serverCmd)
-			// Query the actual model name the server is serving (may differ from download name)
-			servedModel := model
-			if name, err := llm.QueryServedModel(baseURL); err == nil {
-				servedModel = name
-			}
-			return llamaCppServerReadyMsg{Model: servedModel, BaseURL: baseURL}
+			return acquireOrStartServer("llama.cpp", model)
 		}
-
-	case llamaCppServerReadyMsg:
-		m.serverStarting = false
-		if msg.Err != nil {
-			errStyle := lipgloss.NewStyle().Foreground(m.theme.Danger)
-			m.entries = append(m.entries, conversationEntry{
-				content: errStyle.Render(fmt.Sprintf("llama.cpp server failed: %v", msg.Err)),
-			})
-			return m, nil
-		}
-		return m.applyProviderSwitch("llama.cpp", msg.Model, msg.BaseURL)
 
 	case msgs.MLXSetupDoneMsg:
 		m.execGuard = false
@@ -341,49 +265,93 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		}
-		// Start server asynchronously via tea.Cmd
+		// Start or reuse server asynchronously via tea.Cmd
 		model := msg.Model
-		serverRef := m.llamaServer
 		infoStyle := lipgloss.NewStyle().Foreground(m.theme.Muted)
 		m.entries = append(m.entries, conversationEntry{
 			content: infoStyle.Render("Starting MLX server (may download model on first use)..."),
 		})
 		m.serverStarting = true
 		return m, func() tea.Msg {
-			port, err := llm.FindFreePort()
-			if err != nil {
-				return mlxServerReadyMsg{Err: fmt.Errorf("finding free port: %w", err)}
-			}
-			// Use 127.0.0.1 not localhost — mlx_lm binds IPv4 only
-			baseURL := fmt.Sprintf("http://127.0.0.1:%d/v1", port)
-			serverCmd, err := llm.StartMlxServer(model, port)
-			if err != nil {
-				return mlxServerReadyMsg{Err: fmt.Errorf("starting server: %w", err)}
-			}
-			// MLX may download the model on first run — use longer timeout
-			if err := llm.WaitForServer(baseURL, time.Hour); err != nil {
-				llm.StopServer(serverCmd)
-				return mlxServerReadyMsg{Err: fmt.Errorf("server not ready: %w", err)}
-			}
-			serverRef.Set(serverCmd)
-			// Don't use QueryServedModel for MLX — it lists all cached models,
-			// not just the active one, so Data[0] may be wrong.
-			return mlxServerReadyMsg{Model: model, BaseURL: baseURL}
+			return acquireOrStartServer("mlx", model)
 		}
 
-	case mlxServerReadyMsg:
+	case localServerReadyMsg:
 		m.serverStarting = false
 		if msg.Err != nil {
 			errStyle := lipgloss.NewStyle().Foreground(m.theme.Danger)
 			m.entries = append(m.entries, conversationEntry{
-				content: errStyle.Render(fmt.Sprintf("MLX server failed: %v", msg.Err)),
+				content: errStyle.Render(fmt.Sprintf("%s server failed: %v", msg.Provider, msg.Err)),
 			})
 			return m, nil
 		}
-		return m.applyProviderSwitch("mlx", msg.Model, msg.BaseURL)
+		return m.applyProviderSwitch(msg.Provider, msg.Model, msg.BaseURL)
 	}
 
 	return m, nil
+}
+
+// acquireOrStartServer handles the shared server lifecycle for provider switches.
+// Releases the previous server, then acquires or starts a new one.
+// Runs in a tea.Cmd goroutine (not on the main event loop).
+func acquireOrStartServer(provider, model string) localServerReadyMsg {
+	// Release previous shared server (if any)
+	llm.ReleaseSharedServer()
+
+	// Try to reuse an existing server
+	baseURL, err := llm.AcquireSharedServer(provider, model)
+	if err != nil {
+		return localServerReadyMsg{Provider: provider, Err: err}
+	}
+	if baseURL != "" {
+		return localServerReadyMsg{Provider: provider, Model: model, BaseURL: baseURL}
+	}
+
+	// Start a new server
+	port, err := llm.FindFreePort()
+	if err != nil {
+		return localServerReadyMsg{Provider: provider, Err: fmt.Errorf("finding free port: %w", err)}
+	}
+	srvBaseURL := fmt.Sprintf("http://127.0.0.1:%d/v1", port)
+
+	var serverCmd *exec.Cmd
+	if provider == "mlx" {
+		serverCmd, err = llm.StartMlxServer(model, port)
+	} else {
+		serverCmd, err = llm.StartLlamaServer(model, port)
+	}
+	if err != nil {
+		return localServerReadyMsg{Provider: provider, Err: fmt.Errorf("starting server: %w", err)}
+	}
+
+	timeout := 30 * time.Minute
+	if provider == "mlx" {
+		timeout = time.Hour
+	}
+	if err := llm.WaitForServer(srvBaseURL, timeout); err != nil {
+		llm.StopServer(serverCmd)
+		return localServerReadyMsg{Provider: provider, Err: fmt.Errorf("server not ready: %w", err)}
+	}
+
+	servedModel := model
+	if provider == "llama.cpp" {
+		if name, err := llm.QueryServedModel(srvBaseURL); err == nil {
+			servedModel = name
+		}
+	}
+
+	actualURL, regErr := llm.RegisterSharedServer(&llm.ServerInfo{
+		Provider: provider,
+		Model:    servedModel,
+		PID:      serverCmd.Process.Pid,
+		Port:     port,
+		BaseURL:  srvBaseURL,
+	})
+	if regErr != nil {
+		return localServerReadyMsg{Provider: provider, Err: regErr}
+	}
+
+	return localServerReadyMsg{Provider: provider, Model: servedModel, BaseURL: actualURL}
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -505,9 +473,9 @@ func (m Model) applyProviderSwitch(name, model, baseURL string) (tea.Model, tea.
 		m.providerSelect = nil
 		return m, nil
 	}
-	// Stop previous local server if switching away
+	// Release previous shared server if switching to a non-local provider
 	if name != "llama.cpp" && name != "mlx" {
-		m.llamaServer.Stop()
+		llm.ReleaseSharedServer()
 	}
 	m.client = newClient
 	m.cfg.SaveProviderFull(name, model, baseURL)
