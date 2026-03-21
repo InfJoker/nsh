@@ -146,7 +146,7 @@ func (te *ToolExecutor) execRunCommand(ctx context.Context, tc llm.ToolCall) (st
 	te.SendMsg(msgs.ToolCallStartMsg{Name: "run_command", Desc: command})
 
 	if perm.Action == config.ActionDeny {
-		result := fmt.Sprintf("Command denied by permission rules: %s", command)
+		result := fmt.Sprintf("DENIED: %q is blocked by permission rules. Do NOT retry this command. Tell the user it was blocked and suggest an alternative approach.", command)
 		te.SendMsg(msgs.ToolCallDoneMsg{Name: "run_command", Result: result})
 		return result, nil
 	}
@@ -158,7 +158,7 @@ func (te *ToolExecutor) execRunCommand(ctx context.Context, tc llm.ToolCall) (st
 		}
 		switch resp {
 		case msgs.PermissionDeny:
-			result := "Command denied by user"
+			result := fmt.Sprintf("DENIED: The user rejected %q. Do NOT retry this command or any variation of it. Tell the user it was denied and ask how they want to proceed.", command)
 			te.SendMsg(msgs.ToolCallDoneMsg{Name: "run_command", Result: result})
 			return result, nil
 		case msgs.PermissionAlways:
