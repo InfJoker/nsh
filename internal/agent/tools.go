@@ -31,7 +31,7 @@ func ToolDefs() []llm.Tool {
 	return []llm.Tool{
 		{
 			Name:        "run_command",
-			Description: "Execute a shell command and return its output. Use this for non-interactive commands that produce text output.",
+			Description: "Execute a shell command and capture its output. Use when you need to read the result (ls, grep, cat, git status, build/test commands). Do NOT use for programs that may need user input — use launch_interactive instead.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -49,7 +49,7 @@ func ToolDefs() []llm.Tool {
 		},
 		{
 			Name:        "launch_interactive",
-			Description: "Launch an interactive TUI program (vim, ssh, htop, etc.) that takes over the terminal.",
+			Description: "Launch a program with full terminal access. Use for interactive programs (vim, ssh, python, node), unfamiliar commands, or anything that might need user input. When unsure whether a command is interactive, use this.",
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
