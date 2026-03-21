@@ -120,3 +120,14 @@ Interactive TUI testing using `test/e2e/nsh-test.sh` — a Playwright-like CLI t
 ## Development Guidelines
 - **No hardcoded model catalogs.** Model availability changes frequently. Always query llmfit or ollama APIs at runtime.
 - **Interactive I/O in `internal/llm/`**: The `llm` package contains `RunOllamaSetup()` and `RunLlamaCppSetup()` which do interactive stdin/stdout. When called from the TUI, they must run via `tea.ExecProcess` (subprocess) to avoid conflicting with bubbletea's terminal control.
+
+## Known Issues / TODOs
+
+### MLX tool calling text parser (TODO)
+mlx_lm.server has native tool call parsing (via `tool_parsers/`), but many models don't generate the expected `<tool_call>` token — they output tool calls as text (JSON, XML, or custom formats) instead. This affects all Qwen2.5-Coder models (7B and 14B tested). Need a text tool parser in `internal/llm/` that:
+- Detects tool call JSON/XML in streamed text content (when `tool_calls` array is empty)
+- Supported formats: `<tool_call>{...}</tool_call>`, `` ```json\n{...}\n``` ``, `<function name="..." arguments='...'/>`, bare `{"name":"...","arguments":{...}}`
+- Strips leaked stop tokens (`<|im_end|>`, `<|im_start|>`, `</s>`, `<|eot_id|>`)
+- Silence mlx_lm server stderr logs after startup (noisy per-request KV cache / HTTP logs pollute TUI)
+- Check mlx-lm version ≥0.30.1 during setup (tool parsers improved significantly)
+- Add verified model list and warn users that models <14B often fail tool calling
