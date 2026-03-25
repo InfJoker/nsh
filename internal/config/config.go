@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,18 +33,38 @@ type Permissions struct {
 	Rules     []Rule   `toml:"rules"`
 }
 
+// ProviderConfig describes the infrastructure for a provider.
+type ProviderConfig struct {
+	Type    string `toml:"type"`               // "anthropic", "ollama", "llama.cpp", "mlx", "mock"
+	BaseURL string `toml:"base_url,omitempty"` // custom endpoint (omit for native/default)
+	APIKey  string `toml:"api_key,omitempty"`  // for anthropic (env var fallback)
+}
+
+// Preset describes a model selection on a configured provider.
+type Preset struct {
+	Provider string `toml:"provider"` // references a key in [providers]
+	Model    string `toml:"model"`
+}
+
 // Config is the top-level nsh configuration.
 type Config struct {
-	Provider    string      `toml:"provider"`
-	Model       string      `toml:"model"`
-	BaseURL     string      `toml:"base_url"`
+	ActivePreset string                    `toml:"preset"`
+	Providers    map[string]ProviderConfig `toml:"providers"`
+	Presets      map[string]Preset         `toml:"presets"`
+
 	Theme       string      `toml:"theme"`
 	Shell       string      `toml:"shell"`
 	MaxSteps    int         `toml:"max_steps"`
 	Permissions Permissions `toml:"permissions"`
 
-	mu           sync.Mutex
-	learnedRules []Rule
+	// Runtime-only fields resolved from the active preset at startup.
+	// Not persisted to TOML.
+	Provider string `toml:"-"`
+	Model    string `toml:"-"`
+	BaseURL  string `toml:"-"`
+
+	mu           sync.Mutex `toml:"-"`
+	learnedRules []Rule     `toml:"-"`
 }
 
 // NshDir returns the base config directory (~/.nsh).
@@ -55,6 +76,85 @@ func NshDir() string {
 // DataDir returns the data directory (~/.nsh/data).
 func DataDir() string {
 	return filepath.Join(NshDir(), "data")
+}
+
+// GetActivePreset resolves the active preset and its provider config.
+// Returns zero values if not configured.
+func (c *Config) GetActivePreset() (name string, preset Preset, provider ProviderConfig) {
+	name = c.ActivePreset
+	if name == "" || c.Presets == nil {
+		return
+	}
+	preset, ok := c.Presets[name]
+	if !ok {
+		return
+	}
+	if c.Providers != nil {
+		provider = c.Providers[preset.Provider]
+	}
+	return
+}
+
+// ResolvePreset looks up a preset by name and its provider config.
+func (c *Config) ResolvePreset(name string) (Preset, ProviderConfig, error) {
+	if c.Presets == nil {
+		return Preset{}, ProviderConfig{}, fmt.Errorf("no presets configured")
+	}
+	preset, ok := c.Presets[name]
+	if !ok {
+		return Preset{}, ProviderConfig{}, fmt.Errorf("preset %q not found", name)
+	}
+	if c.Providers == nil {
+		return preset, ProviderConfig{}, fmt.Errorf("provider %q not configured", preset.Provider)
+	}
+	prov, ok := c.Providers[preset.Provider]
+	if !ok {
+		return preset, ProviderConfig{}, fmt.Errorf("provider %q referenced by preset %q not found", preset.Provider, name)
+	}
+	return preset, prov, nil
+}
+
+// ListPresets returns all configured presets.
+func (c *Config) ListPresets() map[string]Preset {
+	if c.Presets == nil {
+		return map[string]Preset{}
+	}
+	return c.Presets
+}
+
+// SavePreset adds or updates a preset and writes the config.
+func (c *Config) SavePreset(name string, p Preset) error {
+	if c.Presets == nil {
+		c.Presets = make(map[string]Preset)
+	}
+	c.Presets[name] = p
+	return c.Save()
+}
+
+// SaveProvider adds or updates a provider and writes the config.
+func (c *Config) SaveProvider(name string, p ProviderConfig) error {
+	if c.Providers == nil {
+		c.Providers = make(map[string]ProviderConfig)
+	}
+	c.Providers[name] = p
+	return c.Save()
+}
+
+// SetActivePreset changes the active preset and writes the config.
+func (c *Config) SetActivePreset(name string) error {
+	c.ActivePreset = name
+	return c.Save()
+}
+
+// Save writes the entire config to ~/.nsh/config.toml using proper TOML encoding.
+func (c *Config) Save() error {
+	configPath := filepath.Join(NshDir(), "config.toml")
+	var buf bytes.Buffer
+	enc := toml.NewEncoder(&buf)
+	if err := enc.Encode(c); err != nil {
+		return fmt.Errorf("encoding config: %w", err)
+	}
+	return os.WriteFile(configPath, buf.Bytes(), 0644)
 }
 
 // AllRules returns config rules merged with learned rules. Config rules take priority.
@@ -73,7 +173,6 @@ func (c *Config) IsDangerous(cmd string) bool {
 		if cmd == d {
 			return true
 		}
-		// Check if cmd starts with dangerous prefix
 		if len(cmd) > len(d) && cmd[:len(d)] == d && (cmd[len(d)] == ' ') {
 			return true
 		}
@@ -135,8 +234,6 @@ func Load() (*Config, error) {
 	if cfg.Theme == "" {
 		cfg.Theme = "catppuccin"
 	}
-	// Provider and model defaults are handled by the startup flow in main.go
-	// to allow auto-detection and interactive selection.
 
 	// Load learned rules
 	learnedPath := filepath.Join(dataDir, "learned_rules.toml")
@@ -152,104 +249,70 @@ func Load() (*Config, error) {
 	return &cfg, nil
 }
 
-// SaveProvider writes the provider, model, and base_url to the config file.
-func (c *Config) SaveProvider(provider, model string) error {
-	return c.SaveProviderFull(provider, model, "")
-}
-
-// SaveProviderFull writes the provider, model, and base_url to the config file.
-func (c *Config) SaveProviderFull(provider, model, baseURL string) error {
-	c.Provider = provider
-	c.Model = model
-	c.BaseURL = baseURL
-
-	configPath := filepath.Join(NshDir(), "config.toml")
-	data, err := os.ReadFile(configPath)
+// ResolveActivePreset populates the runtime Provider/Model fields from the active preset.
+// Call after Load() and any --preset flag override.
+func (c *Config) ResolveActivePreset() error {
+	if c.ActivePreset == "" {
+		return nil // no preset configured — caller handles setup
+	}
+	preset, prov, err := c.ResolvePreset(c.ActivePreset)
 	if err != nil {
 		return err
 	}
-
-	content := string(data)
-	// Replace the provider/model lines — match exact key names only
-	lines := strings.Split(content, "\n")
-	var result []string
-	providerSet, modelSet, baseURLSet := false, false, false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		// Skip comments
-		if strings.HasPrefix(trimmed, "#") {
-			result = append(result, line)
-			continue
-		}
-		// Match exact key names only
-		key := extractTOMLKey(trimmed)
-		switch key {
-		case "provider":
-			result = append(result, fmt.Sprintf("provider = %q", provider))
-			providerSet = true
-		case "model":
-			result = append(result, fmt.Sprintf("model = %q", model))
-			modelSet = true
-		case "base_url":
-			if baseURL != "" {
-				result = append(result, fmt.Sprintf("base_url = %q", baseURL))
-			}
-			// else: drop the line (empty base_url)
-			baseURLSet = true
-		default:
-			result = append(result, line)
-		}
+	c.Provider = prov.Type
+	c.Model = preset.Model
+	// BaseURL: use provider's custom URL if set, otherwise blank (native/default)
+	c.BaseURL = prov.BaseURL
+	// API key: use provider config, fall back to env
+	if prov.Type == "anthropic" && prov.APIKey != "" {
+		os.Setenv("ANTHROPIC_API_KEY", prov.APIKey)
 	}
-	if !providerSet {
-		idx := 0
-		for idx < len(result) && strings.HasPrefix(strings.TrimSpace(result[idx]), "#") {
-			idx++
-		}
-		line := fmt.Sprintf("provider = %q", provider)
-		result = append(result[:idx], append([]string{line}, result[idx:]...)...)
-	}
-	if !modelSet {
-		idx := 0
-		for idx < len(result) && (strings.HasPrefix(strings.TrimSpace(result[idx]), "#") || extractTOMLKey(strings.TrimSpace(result[idx])) == "provider") {
-			idx++
-		}
-		line := fmt.Sprintf("model = %q", model)
-		result = append(result[:idx], append([]string{line}, result[idx:]...)...)
-	}
-	if !baseURLSet && baseURL != "" {
-		// Insert after model line
-		idx := 0
-		for idx < len(result) {
-			key := extractTOMLKey(strings.TrimSpace(result[idx]))
-			if key == "model" {
-				idx++
-				break
-			}
-			idx++
-		}
-		line := fmt.Sprintf("base_url = %q", baseURL)
-		result = append(result[:idx], append([]string{line}, result[idx:]...)...)
-	}
-
-	return os.WriteFile(configPath, []byte(strings.Join(result, "\n")), 0644)
+	return nil
 }
 
-// extractTOMLKey returns the exact key name from a TOML line, or "" if not a key=value line.
-func extractTOMLKey(line string) string {
-	if !strings.Contains(line, "=") {
-		return ""
+// SaveProviderFull saves the current runtime provider/model as the active preset.
+// This bridges the old API used by applyProviderSwitch in the TUI.
+func (c *Config) SaveProviderFull(providerType, model, baseURL string) error {
+	presetName := c.ActivePreset
+	if presetName == "" {
+		presetName = "default"
 	}
-	key, _, _ := strings.Cut(line, "=")
-	return strings.TrimSpace(key)
+	// Find or create a provider entry for this type
+	provName := ""
+	if c.Providers != nil {
+		for name, p := range c.Providers {
+			if p.Type == providerType {
+				provName = name
+				break
+			}
+		}
+	}
+	if provName == "" {
+		provName = providerType
+		if c.Providers == nil {
+			c.Providers = make(map[string]ProviderConfig)
+		}
+		c.Providers[provName] = ProviderConfig{Type: providerType, BaseURL: baseURL}
+	}
+	if c.Presets == nil {
+		c.Presets = make(map[string]Preset)
+	}
+	c.Presets[presetName] = Preset{Provider: provName, Model: model}
+	c.ActivePreset = presetName
+	c.Provider = providerType
+	c.Model = model
+	c.BaseURL = baseURL
+	return c.Save()
+}
+
+// HasPresets returns true if the config has the new presets format.
+func (c *Config) HasPresets() bool {
+	return len(c.Presets) > 0
 }
 
 func defaultConfig() string {
-	return `# provider: anthropic, copilot, ollama, or llama.cpp
-# Set to "" to be prompted on first run.
-provider = ""
-model = ""
+	return strings.TrimLeft(`
 theme = "catppuccin"
-# shell defaults to $SHELL
 max_steps = 25
 
 [permissions]
@@ -354,5 +417,5 @@ action = "deny"
 [[permissions.rules]]
 pattern = "dd *"
 action = "deny"
-`
+`, "\n")
 }

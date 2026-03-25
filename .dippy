@@ -1,0 +1,7 @@
+# nsh project — Go build and test
+allow go build
+allow go test
+allow go env
+allow go vet
+allow ./nsh exec
+allow ./test/e2e/nsh-test.sh
