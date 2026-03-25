@@ -26,9 +26,21 @@ import (
 
 func main() {
 	// Check for --exec mode (non-interactive, no TUI)
+	// Supports: nsh --exec "query" [--preset name]
 	if len(os.Args) >= 3 && os.Args[1] == "--exec" {
-		query := strings.Join(os.Args[2:], " ")
-		runExec(query)
+		var query, execPreset string
+		args := os.Args[2:]
+		var queryParts []string
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--preset" && i+1 < len(args) {
+				execPreset = args[i+1]
+				i++
+			} else {
+				queryParts = append(queryParts, args[i])
+			}
+		}
+		query = strings.Join(queryParts, " ")
+		runExec(query, execPreset)
 		return
 	}
 
@@ -83,15 +95,39 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 1. Load config
+	// 1. Parse --preset flag
+	var presetFlag string
+	for i := 1; i < len(os.Args); i++ {
+		if os.Args[i] == "--preset" && i+1 < len(os.Args) {
+			presetFlag = os.Args[i+1]
+			i++
+		}
+	}
+
+	// 2. Load config
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 2. If no provider configured, run first-time setup
-	if cfg.Provider == "" {
+	// 3. Override active preset if --preset given
+	if presetFlag != "" {
+		cfg.ActivePreset = presetFlag
+	}
+
+	// 4. Resolve preset → provider/model, or run first-time setup
+	if cfg.HasPresets() {
+		if err := cfg.ResolveActivePreset(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			fmt.Fprintln(os.Stderr, "Available presets:")
+			for name, p := range cfg.ListPresets() {
+				fmt.Fprintf(os.Stderr, "  %s → %s/%s\n", name, p.Provider, p.Model)
+			}
+			os.Exit(1)
+		}
+	} else {
+		// No presets configured — run first-time setup
 		runProviderSetup(cfg)
 	}
 
@@ -223,16 +259,25 @@ func main() {
 }
 
 // runExec runs a single query through the agent loop without the TUI.
-func runExec(query string) {
+func runExec(query string, presetFlag string) {
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
 
-	if cfg.Provider == "" {
+	if presetFlag != "" {
+		cfg.ActivePreset = presetFlag
+	}
+
+	if cfg.HasPresets() {
+		if err := cfg.ResolveActivePreset(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	} else {
 		cfg.Provider = "anthropic"
-		cfg.Model = "claude-sonnet-4-20250514"
+		cfg.Model = "claude-sonnet-4-6"
 	}
 
 	env := shell.NewEnvState()
@@ -408,7 +453,7 @@ func runProviderSetup(cfg *config.Config) {
 	switch input {
 	case "1", "anthropic":
 		provider = "anthropic"
-		model = "claude-sonnet-4-20250514"
+		model = "claude-sonnet-4-6"
 
 		if !hasAnthropicKey {
 			fmt.Println()
@@ -420,7 +465,7 @@ func runProviderSetup(cfg *config.Config) {
 
 	case "2", "copilot":
 		provider = "copilot"
-		model = "claude-sonnet-4-20250514"
+		model = "claude-sonnet-4-6"
 
 	case "3", "ollama":
 		provider = "ollama"
@@ -456,16 +501,24 @@ func runProviderSetup(cfg *config.Config) {
 		os.Exit(1)
 	}
 
+	// Create provider and preset
+	provName := provider
+	cfg.SaveProvider(provName, config.ProviderConfig{
+		Type:    provider,
+		BaseURL: baseURL,
+	})
+	cfg.SavePreset("default", config.Preset{
+		Provider: provName,
+		Model:    model,
+	})
+	cfg.SetActivePreset("default")
+
+	// Resolve into runtime fields
 	cfg.Provider = provider
 	cfg.Model = model
 	cfg.BaseURL = baseURL
 
-	// Persist to config file
-	if err := cfg.SaveProviderFull(provider, model, baseURL); err != nil {
-		fmt.Fprintf(os.Stderr, "  Warning: couldn't save provider to config: %v\n", err)
-	} else {
-		fmt.Printf("\n  Saved provider=%q, model=%q to ~/.nsh/config.toml\n", provider, model)
-	}
+	fmt.Printf("\n  Saved preset \"default\" → %s/%s to ~/.nsh/config.toml\n", provider, model)
 
 	fmt.Println()
 }
