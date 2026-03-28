@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -o "dist/nsh-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/nsh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nsh-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/nsh-*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="dev-${GITHUB_SHA::7}"
+          gh release create "$TAG" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --notes "Development release from commit ${GITHUB_SHA::7}" \
+            --prerelease
