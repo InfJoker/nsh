@@ -110,11 +110,18 @@ func main() {
 	}
 
 	// 1. Parse --preset flag
+	// --preset <name> → use that preset
+	// --preset (bare, no name) → show interactive picker
 	var presetFlag string
+	presetPicker := false
 	for i := 1; i < len(os.Args); i++ {
-		if os.Args[i] == "--preset" && i+1 < len(os.Args) {
-			presetFlag = os.Args[i+1]
-			i++
+		if os.Args[i] == "--preset" {
+			if i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "--") {
+				presetFlag = os.Args[i+1]
+				i++
+			} else {
+				presetPicker = true
+			}
 		}
 	}
 
@@ -125,12 +132,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Override active preset if --preset given
+	// 3. --preset with name → override active preset
 	if presetFlag != "" {
 		cfg.ActivePreset = presetFlag
 	}
 
-	// 4. Resolve preset → provider/model, or run first-time setup
+	// 4. --preset without name → interactive picker before TUI
+	if presetPicker && cfg.HasPresets() {
+		chosen := runPresetPicker(cfg)
+		if chosen != "" {
+			cfg.ActivePreset = chosen
+		}
+	}
+
+	// 5. Resolve preset → provider/model, or run first-time setup
 	if cfg.HasPresets() {
 		if err := cfg.ResolveActivePreset(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -588,5 +603,76 @@ func runProviderSetup(cfg *config.Config) {
 	fmt.Printf("\n  Saved preset \"default\" → %s/%s to ~/.nsh/config.toml\n", provider, model)
 
 	fmt.Println()
+}
+
+// runPresetPicker shows an interactive numbered list of presets before the TUI starts.
+// Returns the chosen preset name, or "" to use the default.
+func runPresetPicker(cfg *config.Config) string {
+	reader := bufio.NewReader(os.Stdin)
+	presets := cfg.ListPresets()
+	if len(presets) == 0 {
+		return ""
+	}
+
+	// Build sorted list (active preset first)
+	type entry struct {
+		name     string
+		preset   config.Preset
+		isActive bool
+	}
+	var entries []entry
+	// Active first
+	for name, p := range presets {
+		if name == cfg.ActivePreset {
+			entries = append([]entry{{name, p, true}}, entries...)
+		} else {
+			entries = append(entries, entry{name, p, false})
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("  nsh — select a preset:")
+	fmt.Println()
+	defaultIdx := 1
+	for i, e := range entries {
+		marker := ""
+		if e.isActive {
+			marker = "  ✓ last used"
+			defaultIdx = i + 1
+		}
+		// Resolve provider type for display
+		provType := e.preset.Provider
+		if cfg.Providers != nil {
+			if pc, ok := cfg.Providers[e.preset.Provider]; ok {
+				provType = pc.Type
+			}
+		}
+		fmt.Printf("  [%d] %-12s %-10s %s%s\n", i+1, e.name, provType, e.preset.Model, marker)
+	}
+	fmt.Println()
+
+	fmt.Printf("  Enter preset [%d]: ", defaultIdx)
+	ans, _ := reader.ReadString('\n')
+	ans = strings.TrimSpace(ans)
+	if ans == "" {
+		return entries[defaultIdx-1].name
+	}
+
+	// Try as number
+	idx := 0
+	if _, err := fmt.Sscanf(ans, "%d", &idx); err == nil && idx >= 1 && idx <= len(entries) {
+		return entries[idx-1].name
+	}
+
+	// Try as preset name
+	for _, e := range entries {
+		if e.name == ans {
+			return e.name
+		}
+	}
+
+	fmt.Fprintf(os.Stderr, "  Unknown preset: %q\n", ans)
+	os.Exit(1)
+	return ""
 }
 
