@@ -1,7 +1,8 @@
 # Binary
 /nsh
 
-# Screenshots from e2e tests
+# Screenshots from e2e tests (except README screenshots)
 *.png
+!screenshots/*.png
 .specs/scratchpad/
 .DS_Store
