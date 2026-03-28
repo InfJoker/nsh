@@ -12,7 +12,7 @@ STATE_FILE="/tmp/nsh-e2e-state"
 
 cmd_start() {
     local provider="mock"
-    local model="claude-sonnet-4-20250514"
+    local model="claude-sonnet-4-6"
     local base_url=""
 
     while [[ $# -gt 0 ]]; do
