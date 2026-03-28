@@ -22,9 +22,9 @@ jobs:
           - goos: linux
             goarch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -36,7 +36,7 @@ jobs:
           mkdir -p dist
           go build -o "dist/nsh-${{ matrix.goos }}-${{ matrix.goarch }}" ./cmd/nsh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: nsh-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/nsh-*
@@ -45,7 +45,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
