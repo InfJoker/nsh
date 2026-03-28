@@ -12,7 +12,7 @@ import (
 
 // ServerInfo describes a running local LLM server shared across nsh instances.
 type ServerInfo struct {
-	Provider string `json:"provider"` // "llama.cpp" or "mlx"
+	Provider string `json:"provider"` // "llama.cpp", "mlx", or "hypura"
 	Model    string `json:"model"`
 	PID      int    `json:"pid"`  // server process PID
 	Port     int    `json:"port"`
@@ -105,10 +105,19 @@ func serverAlive(pid int) bool {
 	return pid > 0 && syscall.Kill(pid, 0) == nil
 }
 
-// serverResponds checks if the server's /v1/models endpoint returns 200.
-func serverResponds(baseURL string) bool {
+// serverHealthURL returns the appropriate health check URL for a provider.
+// Hypura uses the Ollama-native /api/tags; others use the OpenAI /v1/models path.
+func serverHealthURL(provider, baseURL string) string {
+	if provider == "hypura" {
+		return baseURL + "/api/tags"
+	}
+	return baseURL + "/models"
+}
+
+// serverResponds checks if the server's health endpoint returns 200.
+func serverResponds(provider, baseURL string) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(baseURL + "/models")
+	resp, err := client.Get(serverHealthURL(provider, baseURL))
 	if err != nil {
 		return false
 	}
@@ -158,7 +167,7 @@ func AcquireSharedServer(provider, model string) (baseURL string, err error) {
 		pruneDeadClients(info)
 
 		// Check if existing server matches and is alive
-		if info.Provider == provider && info.Model == model && serverAlive(info.PID) && serverResponds(info.BaseURL) {
+		if info.Provider == provider && info.Model == model && serverAlive(info.PID) && serverResponds(info.Provider, info.BaseURL) {
 			info.Clients = append(info.Clients, myPID)
 			if err := writeInfo(info); err != nil {
 				return fmt.Errorf("writing server info: %w", err)
@@ -186,7 +195,7 @@ func RegisterSharedServer(info *ServerInfo) (baseURL string, err error) {
 		// Check if another process registered while we were starting
 		existing, readErr := readInfo()
 		if readErr == nil && existing.Provider == info.Provider && existing.Model == info.Model &&
-			serverAlive(existing.PID) && serverResponds(existing.BaseURL) {
+			serverAlive(existing.PID) && serverResponds(existing.Provider, existing.BaseURL) {
 			// Another process won the race — reuse theirs, kill ours
 			killServerProcess(info.PID)
 			existing.Clients = append(existing.Clients, myPID)

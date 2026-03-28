@@ -71,3 +71,10 @@ type MLXSetupDoneMsg struct {
 	Model string
 	Err   error
 }
+
+// HypuraSetupDoneMsg signals that the Hypura setup subprocess finished.
+// Only carries the model path (GGUF file) — port allocation and server startup happen in the parent.
+type HypuraSetupDoneMsg struct {
+	Model string
+	Err   error
+}

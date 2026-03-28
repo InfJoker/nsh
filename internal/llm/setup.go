@@ -170,6 +170,62 @@ func RunLlamaCppSetup() (*LlamaCppSetupResult, error) {
 	return &LlamaCppSetupResult{Model: ans}, nil
 }
 
+// HypuraSetupResult holds the result of the interactive Hypura setup flow.
+type HypuraSetupResult struct {
+	Model string // local GGUF file path
+}
+
+// RunHypuraSetup handles the interactive Hypura provider setup flow.
+// Prompts the user for a local GGUF model path.
+// It reads from stdin and writes to stdout — must be called outside the TUI.
+func RunHypuraSetup() (*HypuraSetupResult, error) {
+	reader := bufio.NewReader(os.Stdin)
+
+	if !HypuraInstalled() {
+		fmt.Println()
+		fmt.Println("  Hypura not found on PATH.")
+		fmt.Println("  Install from source:")
+		fmt.Println("    git clone --recurse-submodules https://github.com/t8/hypura.git")
+		fmt.Println("    cd hypura && cargo build --release")
+		fmt.Println("    # Add target/release/hypura to your PATH")
+		fmt.Println()
+		return nil, fmt.Errorf("hypura not installed — see https://github.com/t8/hypura")
+	}
+
+	fmt.Println()
+	fmt.Println("  Enter the path to a GGUF model file.")
+	fmt.Println("  Hypura places tensors across GPU/RAM/NVMe — models larger than RAM are OK.")
+	fmt.Println()
+	fmt.Println("  Popular GGUF models (download from HuggingFace):")
+	fmt.Println("    Qwen/Qwen2.5-Coder-14B-Instruct-GGUF       (14B, coding)")
+	fmt.Println("    Qwen/Qwen2.5-Coder-32B-Instruct-GGUF       (32B, coding)")
+	fmt.Println("    bartowski/Mixtral-8x7B-Instruct-v0.1-GGUF   (47B MoE, general)")
+	fmt.Println("    bartowski/Meta-Llama-3.1-70B-Instruct-GGUF  (70B, general)")
+	fmt.Println()
+	fmt.Println("  Find more: https://huggingface.co/models?sort=trending&search=GGUF")
+	fmt.Println()
+	fmt.Printf("  Model path: ")
+	ans, _ := reader.ReadString('\n')
+	ans = strings.TrimSpace(ans)
+	if ans == "" {
+		return nil, fmt.Errorf("no model path provided")
+	}
+
+	// Expand ~ if present
+	if strings.HasPrefix(ans, "~/") {
+		home, _ := os.UserHomeDir()
+		ans = home + ans[1:]
+	}
+
+	// Validate file exists
+	if _, err := os.Stat(ans); err != nil {
+		return nil, fmt.Errorf("model file not found: %s", ans)
+	}
+
+	fmt.Printf("  ✓ Using %s\n", ans)
+	return &HypuraSetupResult{Model: ans}, nil
+}
+
 // MLXSetupResult holds the result of the interactive MLX setup flow.
 type MLXSetupResult struct {
 	Model string // HuggingFace repo ID (e.g. "mlx-community/Qwen2.5-Coder-14B-Instruct-4bit")

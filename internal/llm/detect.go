@@ -50,6 +50,12 @@ func DetectAvailableProviders() []ProviderInfo {
 			Model:     "", // determined during interactive setup
 		},
 		{
+			Name:      "hypura",
+			Available: HypuraInstalled(),
+			Hint:      hintwhen(!HypuraInstalled(), "cargo build --release (https://github.com/t8/hypura)"),
+			Model:     "", // determined during interactive setup (GGUF path)
+		},
+		{
 			Name:      "mock",
 			Available: true,
 			Model:     "mock",

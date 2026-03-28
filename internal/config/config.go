@@ -35,7 +35,7 @@ type Permissions struct {
 
 // ProviderConfig describes the infrastructure for a provider.
 type ProviderConfig struct {
-	Type    string `toml:"type"`               // "anthropic", "ollama", "llama.cpp", "mlx", "mock"
+	Type    string `toml:"type"`               // "anthropic", "ollama", "llama.cpp", "mlx", "hypura", "mock"
 	BaseURL string `toml:"base_url,omitempty"` // custom endpoint (omit for native/default)
 	APIKey  string `toml:"api_key,omitempty"`  // for anthropic (env var fallback)
 }
