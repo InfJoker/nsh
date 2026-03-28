@@ -41,7 +41,7 @@ func RunCaptured(
 		if result.Output != "" {
 			sendOutput(msgs.CommandOutputMsg{Line: result.Output})
 		}
-		return 0, nil
+		return result.ExitCode, nil
 	}
 
 	if timeout == 0 {

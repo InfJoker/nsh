@@ -5,12 +5,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // BuiltinResult holds the result of a built-in command execution.
 type BuiltinResult struct {
 	Output           string
 	NewCwd           string // non-empty if cwd changed
+	ExitCode         int    // 0 for success, 1 for errors (cd to nonexistent dir, etc.)
 	IsBuiltin        bool
 	IsProviderSwitch bool   // true if TUI should show provider selection overlay
 	IsPresetSwitch   bool   // true if TUI should show preset selection overlay
@@ -18,7 +21,11 @@ type BuiltinResult struct {
 }
 
 // IsBuiltin checks if a command is a built-in without executing it.
+// Compound commands (using &&, ||, ;, |) are NOT builtins — they must go to the shell.
 func IsBuiltin(command string) bool {
+	if isCompoundCommand(command) {
+		return false
+	}
 	parts := strings.Fields(command)
 	if len(parts) == 0 {
 		return false
@@ -28,6 +35,31 @@ func IsBuiltin(command string) bool {
 		return true
 	}
 	return false
+}
+
+// isCompoundCommand uses the shell AST parser to detect compound commands
+// (&&, ||, ;, |, etc.). This avoids false positives from naive substring
+// matching on operator characters inside quoted arguments.
+func isCompoundCommand(command string) bool {
+	parser := syntax.NewParser()
+	prog, err := parser.Parse(strings.NewReader(command), "")
+	if err != nil {
+		return false
+	}
+	// A simple command has exactly one statement.
+	// Multiple statements (separated by ; or &) or compound operators are compound.
+	if len(prog.Stmts) != 1 {
+		return len(prog.Stmts) > 1
+	}
+	stmt := prog.Stmts[0]
+	switch stmt.Cmd.(type) {
+	case *syntax.CallExpr: // simple command: ls -la, cd /tmp
+		return false
+	case *syntax.DeclClause: // export, declare, local
+		return false
+	default: // BinaryCmd (&&, ||), PipelineCmd (|), etc.
+		return true
+	}
 }
 
 // ExecBuiltin checks if a command is a built-in and executes it.
@@ -74,7 +106,7 @@ func execCd(env *EnvState, args []string) BuiltinResult {
 	case 0:
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return BuiltinResult{IsBuiltin: true, Output: fmt.Sprintf("cd: %v", err)}
+			return BuiltinResult{IsBuiltin: true, ExitCode: 1, Output: fmt.Sprintf("cd: %v", err)}
 		}
 		target = home
 	case 1:
@@ -82,7 +114,7 @@ func execCd(env *EnvState, args []string) BuiltinResult {
 		if target == "-" {
 			old := env.Get("OLDPWD")
 			if old == "" {
-				return BuiltinResult{IsBuiltin: true, Output: "cd: OLDPWD not set"}
+				return BuiltinResult{IsBuiltin: true, ExitCode: 1, Output: "cd: OLDPWD not set"}
 			}
 			target = old
 		}
@@ -91,7 +123,7 @@ func execCd(env *EnvState, args []string) BuiltinResult {
 			target = filepath.Join(home, target[1:])
 		}
 	default:
-		return BuiltinResult{IsBuiltin: true, Output: "cd: too many arguments"}
+		return BuiltinResult{IsBuiltin: true, ExitCode: 1, Output: "cd: too many arguments"}
 	}
 
 	// Resolve relative to current cwd
@@ -103,10 +135,10 @@ func execCd(env *EnvState, args []string) BuiltinResult {
 	// Verify directory exists
 	info, err := os.Stat(target)
 	if err != nil {
-		return BuiltinResult{IsBuiltin: true, Output: fmt.Sprintf("cd: %v", err)}
+		return BuiltinResult{IsBuiltin: true, ExitCode: 1, Output: fmt.Sprintf("cd: %v", err)}
 	}
 	if !info.IsDir() {
-		return BuiltinResult{IsBuiltin: true, Output: fmt.Sprintf("cd: %s: Not a directory", target)}
+		return BuiltinResult{IsBuiltin: true, ExitCode: 1, Output: fmt.Sprintf("cd: %s: Not a directory", target)}
 	}
 
 	env.ChangeCwd(target)
