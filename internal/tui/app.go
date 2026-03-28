@@ -276,6 +276,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return acquireOrStartServer("mlx", model)
 		}
 
+	case msgs.HypuraSetupDoneMsg:
+		m.execGuard = false
+		if msg.Err != nil {
+			errStyle := lipgloss.NewStyle().Foreground(m.theme.Danger)
+			m.entries = append(m.entries, conversationEntry{
+				content: errStyle.Render(fmt.Sprintf("Hypura setup failed: %v", msg.Err)),
+			})
+			return m, nil
+		}
+		model := msg.Model
+		infoStyle := lipgloss.NewStyle().Foreground(m.theme.Muted)
+		m.entries = append(m.entries, conversationEntry{
+			content: infoStyle.Render("Starting Hypura server..."),
+		})
+		m.serverStarting = true
+		return m, func() tea.Msg {
+			return acquireOrStartServer("hypura", model)
+		}
+
 	case localServerReadyMsg:
 		m.serverStarting = false
 		if msg.Err != nil {
@@ -312,12 +331,22 @@ func acquireOrStartServer(provider, model string) localServerReadyMsg {
 	if err != nil {
 		return localServerReadyMsg{Provider: provider, Err: fmt.Errorf("finding free port: %w", err)}
 	}
-	srvBaseURL := fmt.Sprintf("http://127.0.0.1:%d/v1", port)
+
+	// Hypura uses Ollama-native API (no /v1 prefix)
+	var srvBaseURL string
+	if provider == "hypura" {
+		srvBaseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	} else {
+		srvBaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
+	}
 
 	var serverCmd *exec.Cmd
-	if provider == "mlx" {
+	switch provider {
+	case "mlx":
 		serverCmd, err = llm.StartMlxServer(model, port)
-	} else {
+	case "hypura":
+		serverCmd, err = llm.StartHypuraServer(model, port)
+	default:
 		serverCmd, err = llm.StartLlamaServer(model, port)
 	}
 	if err != nil {
@@ -328,14 +357,27 @@ func acquireOrStartServer(provider, model string) localServerReadyMsg {
 	if provider == "mlx" {
 		timeout = time.Hour
 	}
-	if err := llm.WaitForServer(srvBaseURL, timeout); err != nil {
-		llm.StopServer(serverCmd)
-		return localServerReadyMsg{Provider: provider, Err: fmt.Errorf("server not ready: %w", err)}
+
+	if provider == "hypura" {
+		if err := llm.WaitForHypuraServer(srvBaseURL, timeout); err != nil {
+			llm.StopServer(serverCmd)
+			return localServerReadyMsg{Provider: provider, Err: fmt.Errorf("server not ready: %w", err)}
+		}
+	} else {
+		if err := llm.WaitForServer(srvBaseURL, timeout); err != nil {
+			llm.StopServer(serverCmd)
+			return localServerReadyMsg{Provider: provider, Err: fmt.Errorf("server not ready: %w", err)}
+		}
 	}
 
 	servedModel := model
-	if provider == "llama.cpp" {
+	switch provider {
+	case "llama.cpp":
 		if name, err := llm.QueryServedModel(srvBaseURL); err == nil {
+			servedModel = name
+		}
+	case "hypura":
+		if name, err := llm.QueryHypuraModel(srvBaseURL); err == nil {
 			servedModel = name
 		}
 	}
@@ -452,6 +494,12 @@ func (m Model) handleProviderSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.execGuard = true
 			return m, launchMLXSetup()
 		}
+		// Hypura always gets the interactive setup (GGUF model path)
+		if sel.Name == "hypura" {
+			m.providerSelect = nil
+			m.execGuard = true
+			return m, launchHypuraSetup()
+		}
 		if !sel.Available {
 			return m, nil
 		}
@@ -474,7 +522,7 @@ func (m Model) applyProviderSwitch(name, model, baseURL string) (tea.Model, tea.
 		return m, nil
 	}
 	// Release previous shared server if switching to a non-local provider
-	if name != "llama.cpp" && name != "mlx" {
+	if name != "llama.cpp" && name != "mlx" && name != "hypura" {
 		llm.ReleaseSharedServer()
 	}
 	m.client = newClient
@@ -559,6 +607,30 @@ func launchMLXSetup() tea.Cmd {
 			return msgs.MLXSetupDoneMsg{Err: fmt.Errorf("no model selected")}
 		}
 		return msgs.MLXSetupDoneMsg{Model: model}
+	})
+}
+
+// launchHypuraSetup runs the Hypura setup flow as a subprocess via tea.ExecProcess.
+// The subprocess only handles model path selection. Port allocation and server startup
+// happen in the parent process.
+func launchHypuraSetup() tea.Cmd {
+	resultFile := filepath.Join(os.TempDir(), fmt.Sprintf("nsh-hypura-setup-%d", os.Getpid()))
+	self, _ := os.Executable()
+	c := exec.Command(self, "--hypura-setup", resultFile)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		defer os.Remove(resultFile)
+		if err != nil {
+			return msgs.HypuraSetupDoneMsg{Err: err}
+		}
+		data, err := os.ReadFile(resultFile)
+		if err != nil {
+			return msgs.HypuraSetupDoneMsg{Err: fmt.Errorf("reading setup result: %w", err)}
+		}
+		model := strings.TrimSpace(string(data))
+		if model == "" {
+			return msgs.HypuraSetupDoneMsg{Err: fmt.Errorf("no model selected")}
+		}
+		return msgs.HypuraSetupDoneMsg{Model: model}
 	})
 }
 
