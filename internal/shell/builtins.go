@@ -12,7 +12,9 @@ type BuiltinResult struct {
 	Output           string
 	NewCwd           string // non-empty if cwd changed
 	IsBuiltin        bool
-	IsProviderSwitch bool // true if TUI should show provider selection overlay
+	IsProviderSwitch bool   // true if TUI should show provider selection overlay
+	IsPresetSwitch   bool   // true if TUI should show preset selection overlay
+	PresetArg        string // preset name for direct switch (e.g. !presets light)
 }
 
 // IsBuiltin checks if a command is a built-in without executing it.
@@ -22,7 +24,7 @@ func IsBuiltin(command string) bool {
 		return false
 	}
 	switch parts[0] {
-	case "cd", "export", "unset", "alias", "unalias", "provider":
+	case "cd", "export", "unset", "alias", "unalias", "provider", "presets", "providers":
 		return true
 	}
 	return false
@@ -53,8 +55,14 @@ func ExecBuiltin(env *EnvState, command string) BuiltinResult {
 		return execAlias(env, parts[1:])
 	case "unalias":
 		return execUnalias(env, parts[1:])
-	case "provider":
+	case "provider", "providers":
 		return BuiltinResult{IsBuiltin: true, IsProviderSwitch: true}
+	case "presets":
+		arg := ""
+		if len(parts) > 1 {
+			arg = parts[1]
+		}
+		return BuiltinResult{IsBuiltin: true, IsPresetSwitch: true, PresetArg: arg}
 	default:
 		return BuiltinResult{}
 	}

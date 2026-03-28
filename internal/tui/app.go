@@ -77,6 +77,7 @@ type Model struct {
 
 	activeCmd      *CommandModel
 	providerSelect *providerSelectState
+	presetSelect   *presetSelectState
 
 	busy            bool
 	width, height   int
@@ -397,6 +398,9 @@ func acquireOrStartServer(provider, model string) localServerReadyMsg {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.presetSelect != nil {
+		return m.handlePresetSelectKey(msg)
+	}
 	if m.providerSelect != nil {
 		return m.handleProviderSelectKey(msg)
 	}
@@ -456,6 +460,63 @@ func (m Model) handlePermissionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m Model) handlePresetSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	ps := m.presetSelect
+	key := msg.Key()
+
+	switch {
+	case key.Code == tea.KeyUp:
+		if ps.cursor > 0 {
+			ps.cursor--
+		}
+	case key.Code == tea.KeyDown:
+		if ps.cursor < len(ps.entries)-1 {
+			ps.cursor++
+		}
+	case key.Code == tea.KeyEnter:
+		name := ps.selected()
+		m.presetSelect = nil
+		if name != "" {
+			return m.switchToPreset(name)
+		}
+	case key.Code == tea.KeyEscape || (key.Code == 'c' && key.Mod&tea.ModCtrl != 0):
+		m.presetSelect = nil
+	}
+
+	return m, nil
+}
+
+// switchToPreset switches the active preset. Handles server lifecycle.
+func (m Model) switchToPreset(name string) (tea.Model, tea.Cmd) {
+	preset, prov, err := m.cfg.ResolvePreset(name)
+	if err != nil {
+		errStyle := lipgloss.NewStyle().Foreground(m.theme.Danger)
+		m.entries = append(m.entries, conversationEntry{
+			content: errStyle.Render(fmt.Sprintf("Preset error: %v", err)),
+		})
+		return m, nil
+	}
+
+	provType := prov.Type
+	model := preset.Model
+	baseURL := prov.BaseURL
+
+	// For local providers, need to start/acquire server
+	if provType == "mlx" || provType == "llama.cpp" || provType == "hypura" {
+		infoStyle := lipgloss.NewStyle().Foreground(m.theme.Muted)
+		m.entries = append(m.entries, conversationEntry{
+			content: infoStyle.Render(fmt.Sprintf("Switching to %s (%s/%s)...", name, provType, model)),
+		})
+		m.serverStarting = true
+		return m, func() tea.Msg {
+			return acquireOrStartServer(provType, model)
+		}
+	}
+
+	// For cloud/mock providers, switch immediately
+	return m.applyProviderSwitch(provType, model, baseURL)
 }
 
 func (m Model) handleProviderSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -659,6 +720,17 @@ func (m Model) submitInput() (tea.Model, tea.Cmd) {
 			m.providerSelect = newProviderSelectState()
 			return m, nil
 		}
+		if result.IsPresetSwitch {
+			if result.PresetArg != "" {
+				// Direct switch: !presets light
+				return m.switchToPreset(result.PresetArg)
+			}
+			m.presetSelect = newPresetSelectState(m.cfg)
+			if m.presetSelect == nil {
+				m.entries = append(m.entries, conversationEntry{content: "No presets configured. Add one in ~/.nsh/config.toml"})
+			}
+			return m, nil
+		}
 		if result.Output != "" {
 			m.entries = append(m.entries, conversationEntry{content: result.Output})
 		}
@@ -790,6 +862,10 @@ func (m Model) View() tea.View {
 
 	if m.providerSelect != nil {
 		sb.WriteString(renderProviderSelect(m.providerSelect, m.theme))
+	}
+
+	if m.presetSelect != nil {
+		sb.WriteString(renderPresetSelect(m.presetSelect, m.theme))
 	}
 
 	if !m.busy || m.permPrompt != nil {
