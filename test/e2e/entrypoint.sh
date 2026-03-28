@@ -3,13 +3,25 @@ set -e
 
 mkdir -p ~/.nsh
 
-# Build config, only include base_url if set
+PROVIDER="${NSH_PROVIDER:-mock}"
+MODEL="${NSH_MODEL:-mock}"
+BASE_URL="${NSH_BASE_URL:-}"
+
+# Build config with presets format
 {
-    echo "provider = \"${NSH_PROVIDER:-mock}\""
-    echo "model = \"${NSH_MODEL:-claude-sonnet-4-20250514}\""
-    if [[ -n "${NSH_BASE_URL:-}" ]]; then
-        echo "base_url = \"${NSH_BASE_URL}\""
+    echo 'preset = "default"'
+    echo 'theme = "catppuccin"'
+    echo 'max_steps = 25'
+    echo ''
+    echo "[providers.default]"
+    echo "type = \"${PROVIDER}\""
+    if [[ -n "${BASE_URL}" ]]; then
+        echo "base_url = \"${BASE_URL}\""
     fi
+    echo ''
+    echo "[presets.default]"
+    echo 'provider = "default"'
+    echo "model = \"${MODEL}\""
 } > ~/.nsh/config.toml
 
 # Start tmux with nsh
