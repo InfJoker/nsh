@@ -623,75 +623,45 @@ func launchOllamaSetup() tea.Cmd {
 	})
 }
 
-// launchLlamaCppSetup runs the llama.cpp setup flow as a subprocess via tea.ExecProcess.
-// The subprocess only handles model selection/download. Port allocation and server startup
-// happen in the parent process to avoid TOCTOU races.
+// launchModelSetup runs a provider setup subprocess that returns a model name.
+// Used by llama.cpp, MLX, and Hypura (which only need model selection — no baseURL).
+// Port allocation and server startup happen in the parent process.
+func launchModelSetup(flag, filePrefix string, makeMsg func(string, error) tea.Msg) tea.Cmd {
+	resultFile := filepath.Join(os.TempDir(), fmt.Sprintf("nsh-%s-setup-%d", filePrefix, os.Getpid()))
+	self, _ := os.Executable()
+	c := exec.Command(self, "--"+flag+"-setup", resultFile)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		defer os.Remove(resultFile)
+		if err != nil {
+			return makeMsg("", err)
+		}
+		data, err := os.ReadFile(resultFile)
+		if err != nil {
+			return makeMsg("", fmt.Errorf("reading setup result: %w", err))
+		}
+		model := strings.TrimSpace(string(data))
+		if model == "" {
+			return makeMsg("", fmt.Errorf("no model selected"))
+		}
+		return makeMsg(model, nil)
+	})
+}
+
 func launchLlamaCppSetup() tea.Cmd {
-	resultFile := filepath.Join(os.TempDir(), fmt.Sprintf("nsh-llamacpp-setup-%d", os.Getpid()))
-	self, _ := os.Executable()
-	c := exec.Command(self, "--llamacpp-setup", resultFile)
-	return tea.ExecProcess(c, func(err error) tea.Msg {
-		defer os.Remove(resultFile)
-		if err != nil {
-			return msgs.LlamaCppSetupDoneMsg{Err: err}
-		}
-		data, err := os.ReadFile(resultFile)
-		if err != nil {
-			return msgs.LlamaCppSetupDoneMsg{Err: fmt.Errorf("reading setup result: %w", err)}
-		}
-		model := strings.TrimSpace(string(data))
-		if model == "" {
-			return msgs.LlamaCppSetupDoneMsg{Err: fmt.Errorf("no model selected")}
-		}
-		return msgs.LlamaCppSetupDoneMsg{Model: model}
+	return launchModelSetup("llamacpp", "llamacpp", func(model string, err error) tea.Msg {
+		return msgs.LlamaCppSetupDoneMsg{Model: model, Err: err}
 	})
 }
 
-// launchMLXSetup runs the MLX setup flow as a subprocess via tea.ExecProcess.
-// The subprocess only handles model selection. Port allocation and server startup
-// happen in the parent process.
 func launchMLXSetup() tea.Cmd {
-	resultFile := filepath.Join(os.TempDir(), fmt.Sprintf("nsh-mlx-setup-%d", os.Getpid()))
-	self, _ := os.Executable()
-	c := exec.Command(self, "--mlx-setup", resultFile)
-	return tea.ExecProcess(c, func(err error) tea.Msg {
-		defer os.Remove(resultFile)
-		if err != nil {
-			return msgs.MLXSetupDoneMsg{Err: err}
-		}
-		data, err := os.ReadFile(resultFile)
-		if err != nil {
-			return msgs.MLXSetupDoneMsg{Err: fmt.Errorf("reading setup result: %w", err)}
-		}
-		model := strings.TrimSpace(string(data))
-		if model == "" {
-			return msgs.MLXSetupDoneMsg{Err: fmt.Errorf("no model selected")}
-		}
-		return msgs.MLXSetupDoneMsg{Model: model}
+	return launchModelSetup("mlx", "mlx", func(model string, err error) tea.Msg {
+		return msgs.MLXSetupDoneMsg{Model: model, Err: err}
 	})
 }
 
-// launchHypuraSetup runs the Hypura setup flow as a subprocess via tea.ExecProcess.
-// The subprocess only handles model path selection. Port allocation and server startup
-// happen in the parent process.
 func launchHypuraSetup() tea.Cmd {
-	resultFile := filepath.Join(os.TempDir(), fmt.Sprintf("nsh-hypura-setup-%d", os.Getpid()))
-	self, _ := os.Executable()
-	c := exec.Command(self, "--hypura-setup", resultFile)
-	return tea.ExecProcess(c, func(err error) tea.Msg {
-		defer os.Remove(resultFile)
-		if err != nil {
-			return msgs.HypuraSetupDoneMsg{Err: err}
-		}
-		data, err := os.ReadFile(resultFile)
-		if err != nil {
-			return msgs.HypuraSetupDoneMsg{Err: fmt.Errorf("reading setup result: %w", err)}
-		}
-		model := strings.TrimSpace(string(data))
-		if model == "" {
-			return msgs.HypuraSetupDoneMsg{Err: fmt.Errorf("no model selected")}
-		}
-		return msgs.HypuraSetupDoneMsg{Model: model}
+	return launchModelSetup("hypura", "hypura", func(model string, err error) tea.Msg {
+		return msgs.HypuraSetupDoneMsg{Model: model, Err: err}
 	})
 }
 

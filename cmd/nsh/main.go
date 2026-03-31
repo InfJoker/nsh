@@ -45,63 +45,53 @@ func main() {
 		return
 	}
 
-	// Hidden flag: --ollama-setup <resultfile> (used by TUI provider switch via tea.ExecProcess)
-	if len(os.Args) >= 3 && os.Args[1] == "--ollama-setup" {
-		resultFile := os.Args[2]
-		result, err := llm.RunOllamaSetup()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %v\n", err)
-			os.Exit(1)
-		}
-		// Write result for the TUI to read back
-		os.WriteFile(resultFile, []byte(result.Model+"\n"+result.BaseURL+"\n"), 0600)
-		fmt.Println("\n  Press Enter to return to nsh...")
-		bufio.NewReader(os.Stdin).ReadByte()
-		return
+	// Hidden setup flags (used by TUI provider switch via tea.ExecProcess)
+	setupHandlers := map[string]func() (string, error){
+		"--ollama-setup": func() (string, error) {
+			r, err := llm.RunOllamaSetup()
+			if err != nil {
+				return "", err
+			}
+			return r.Model + "\n" + r.BaseURL + "\n", nil
+		},
+		"--llamacpp-setup": func() (string, error) {
+			r, err := llm.RunLlamaCppSetup()
+			if err != nil {
+				return "", err
+			}
+			return r.Model + "\n", nil
+		},
+		"--mlx-setup": func() (string, error) {
+			r, err := llm.RunMLXSetup()
+			if err != nil {
+				return "", err
+			}
+			return r.Model + "\n", nil
+		},
+		"--hypura-setup": func() (string, error) {
+			r, err := llm.RunHypuraSetup()
+			if err != nil {
+				return "", err
+			}
+			return r.Model + "\n", nil
+		},
 	}
-
-	// Hidden flag: --llamacpp-setup <resultfile> (used by TUI provider switch via tea.ExecProcess)
-	if len(os.Args) >= 3 && os.Args[1] == "--llamacpp-setup" {
-		resultFile := os.Args[2]
-		result, err := llm.RunLlamaCppSetup()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %v\n", err)
-			os.Exit(1)
+	if len(os.Args) >= 3 {
+		if handler, ok := setupHandlers[os.Args[1]]; ok {
+			resultFile := os.Args[2]
+			result, err := handler()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "  %v\n", err)
+				os.Exit(1)
+			}
+			if err := os.WriteFile(resultFile, []byte(result), 0600); err != nil {
+				fmt.Fprintf(os.Stderr, "Error writing setup result: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("\n  Press Enter to return to nsh...")
+			bufio.NewReader(os.Stdin).ReadByte()
+			return
 		}
-		// Write only the model name — port allocation happens in the parent process
-		os.WriteFile(resultFile, []byte(result.Model+"\n"), 0600)
-		fmt.Println("\n  Press Enter to return to nsh...")
-		bufio.NewReader(os.Stdin).ReadByte()
-		return
-	}
-
-	// Hidden flag: --mlx-setup <resultfile> (used by TUI provider switch via tea.ExecProcess)
-	if len(os.Args) >= 3 && os.Args[1] == "--mlx-setup" {
-		resultFile := os.Args[2]
-		result, err := llm.RunMLXSetup()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %v\n", err)
-			os.Exit(1)
-		}
-		// Write only the model name (HF repo ID) — port allocation happens in the parent process
-		os.WriteFile(resultFile, []byte(result.Model+"\n"), 0600)
-		fmt.Println("\n  Press Enter to return to nsh...")
-		bufio.NewReader(os.Stdin).ReadByte()
-		return
-	}
-
-	// Hidden flag: --hypura-setup <resultfile> (used by TUI provider switch via tea.ExecProcess)
-	if len(os.Args) >= 3 && os.Args[1] == "--hypura-setup" {
-		resultFile := os.Args[2]
-		result, err := llm.RunHypuraSetup()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %v\n", err)
-			os.Exit(1)
-		}
-		os.WriteFile(resultFile, []byte(result.Model+"\n"), 0600)
-		fmt.Println("\n  Press Enter to return to nsh...")
-		bufio.NewReader(os.Stdin).ReadByte()
-		return
 	}
 
 	// Non-TTY guard
@@ -185,94 +175,7 @@ func main() {
 
 	// 7. For local providers, reuse a shared server or start a new one.
 	// Reference-counted via flock — last nsh to exit kills the server.
-	var usingSharedServer bool
-
-	if cfg.Provider == "mlx" || cfg.Provider == "llama.cpp" || cfg.Provider == "hypura" {
-		baseURL, err := llm.AcquireSharedServer(cfg.Provider, cfg.Model)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error acquiring server: %v\n", err)
-			os.Exit(1)
-		}
-
-		if baseURL != "" {
-			// Reusing existing server (refcount already incremented)
-			cfg.BaseURL = baseURL
-			usingSharedServer = true
-			fmt.Fprintf(os.Stderr, "Reusing %s server for %s\n", cfg.Provider, cfg.Model)
-		} else {
-			// Start a new server
-			port, err := llm.FindFreePort()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", err)
-				os.Exit(1)
-			}
-
-			// Hypura uses Ollama-native API (no /v1 prefix)
-			if cfg.Provider == "hypura" {
-				cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
-			} else {
-				cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
-			}
-
-			fmt.Fprintf(os.Stderr, "Starting %s server for %s on port %d...\n", cfg.Provider, cfg.Model, port)
-			var serverCmd *exec.Cmd
-			switch cfg.Provider {
-			case "mlx":
-				serverCmd, err = llm.StartMlxServer(cfg.Model, port)
-			case "hypura":
-				serverCmd, err = llm.StartHypuraServer(cfg.Model, port)
-			default:
-				serverCmd, err = llm.StartLlamaServer(cfg.Model, port)
-			}
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
-				os.Exit(1)
-			}
-
-			timeout := 30 * time.Minute
-			if cfg.Provider == "mlx" {
-				timeout = time.Hour
-			}
-
-			if cfg.Provider == "hypura" {
-				if err := llm.WaitForHypuraServer(cfg.BaseURL, timeout); err != nil {
-					llm.StopServer(serverCmd)
-					fmt.Fprintf(os.Stderr, "Server did not become ready: %v\n", err)
-					os.Exit(1)
-				}
-				if servedModel, err := llm.QueryHypuraModel(cfg.BaseURL); err == nil {
-					cfg.Model = servedModel
-				}
-			} else {
-				if err := llm.WaitForServer(cfg.BaseURL, timeout); err != nil {
-					llm.StopServer(serverCmd)
-					fmt.Fprintf(os.Stderr, "Server did not become ready: %v\n", err)
-					os.Exit(1)
-				}
-				if cfg.Provider == "llama.cpp" {
-					if servedModel, err := llm.QueryServedModel(cfg.BaseURL); err == nil {
-						cfg.Model = servedModel
-					}
-				}
-			}
-
-			// Register (or reuse if another process won the race)
-			actualURL, regErr := llm.RegisterSharedServer(&llm.ServerInfo{
-				Provider: cfg.Provider,
-				Model:    cfg.Model,
-				PID:      serverCmd.Process.Pid,
-				Port:     port,
-				BaseURL:  cfg.BaseURL,
-			})
-			if regErr != nil {
-				fmt.Fprintf(os.Stderr, "Error registering server: %v\n", regErr)
-				os.Exit(1)
-			}
-			cfg.BaseURL = actualURL
-			usingSharedServer = true
-			fmt.Fprintln(os.Stderr, "Server ready")
-		}
-	}
+	usingSharedServer := ensureLocalServer(cfg, true)
 
 	// 8. Create LLM client
 	client, err := llm.NewProvider(cfg.Provider, cfg.Model, cfg.BaseURL)
@@ -340,80 +243,7 @@ func runExec(query string, presetFlag string) {
 	}
 
 	// For local providers in exec mode, reuse shared server or start one
-	var execUsingShared bool
-	if cfg.Provider == "mlx" || cfg.Provider == "llama.cpp" || cfg.Provider == "hypura" {
-		baseURL, acquireErr := llm.AcquireSharedServer(cfg.Provider, cfg.Model)
-		if acquireErr != nil {
-			fmt.Fprintf(os.Stderr, "Error acquiring server: %v\n", acquireErr)
-			os.Exit(1)
-		}
-		if baseURL != "" {
-			cfg.BaseURL = baseURL
-			execUsingShared = true
-		} else {
-			port, portErr := llm.FindFreePort()
-			if portErr != nil {
-				fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", portErr)
-				os.Exit(1)
-			}
-			if cfg.Provider == "hypura" {
-				cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
-			} else {
-				cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
-			}
-			var serverCmd *exec.Cmd
-			switch cfg.Provider {
-			case "mlx":
-				serverCmd, err = llm.StartMlxServer(cfg.Model, port)
-			case "hypura":
-				serverCmd, err = llm.StartHypuraServer(cfg.Model, port)
-			default:
-				serverCmd, err = llm.StartLlamaServer(cfg.Model, port)
-			}
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
-				os.Exit(1)
-			}
-			timeout := 30 * time.Minute
-			if cfg.Provider == "mlx" {
-				timeout = time.Hour
-			}
-			if cfg.Provider == "hypura" {
-				if err := llm.WaitForHypuraServer(cfg.BaseURL, timeout); err != nil {
-					llm.StopServer(serverCmd)
-					fmt.Fprintf(os.Stderr, "Server did not become ready: %v\n", err)
-					os.Exit(1)
-				}
-				if servedModel, err := llm.QueryHypuraModel(cfg.BaseURL); err == nil {
-					cfg.Model = servedModel
-				}
-			} else {
-				if err := llm.WaitForServer(cfg.BaseURL, timeout); err != nil {
-					llm.StopServer(serverCmd)
-					fmt.Fprintf(os.Stderr, "Server did not become ready: %v\n", err)
-					os.Exit(1)
-				}
-				if cfg.Provider == "llama.cpp" {
-					if servedModel, err := llm.QueryServedModel(cfg.BaseURL); err == nil {
-						cfg.Model = servedModel
-					}
-				}
-			}
-			actualURL, regErr := llm.RegisterSharedServer(&llm.ServerInfo{
-				Provider: cfg.Provider,
-				Model:    cfg.Model,
-				PID:      serverCmd.Process.Pid,
-				Port:     port,
-				BaseURL:  cfg.BaseURL,
-			})
-			if regErr != nil {
-				fmt.Fprintf(os.Stderr, "Error registering server: %v\n", regErr)
-				os.Exit(1)
-			}
-			cfg.BaseURL = actualURL
-			execUsingShared = true
-		}
-	}
+	execUsingShared := ensureLocalServer(cfg, false)
 
 	client, err := llm.NewProvider(cfg.Provider, cfg.Model, cfg.BaseURL)
 	if err != nil {
@@ -677,5 +507,103 @@ func runPresetPicker(cfg *config.Config) string {
 	fmt.Fprintf(os.Stderr, "  Unknown preset: %q\n", ans)
 	os.Exit(1)
 	return ""
+}
+
+// ensureLocalServer acquires or starts a shared server for local providers (mlx, llama.cpp, hypura).
+// Modifies cfg.BaseURL and cfg.Model in place. Returns true if a shared server is in use.
+// When verbose is true, prints status messages to stderr.
+func ensureLocalServer(cfg *config.Config, verbose bool) bool {
+	if cfg.Provider != "mlx" && cfg.Provider != "llama.cpp" && cfg.Provider != "hypura" {
+		return false
+	}
+
+	baseURL, err := llm.AcquireSharedServer(cfg.Provider, cfg.Model)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error acquiring server: %v\n", err)
+		os.Exit(1)
+	}
+
+	if baseURL != "" {
+		cfg.BaseURL = baseURL
+		if verbose {
+			fmt.Fprintf(os.Stderr, "Reusing %s server for %s\n", cfg.Provider, cfg.Model)
+		}
+		return true
+	}
+
+	port, err := llm.FindFreePort()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error finding free port: %v\n", err)
+		os.Exit(1)
+	}
+
+	if cfg.Provider == "hypura" {
+		cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	} else {
+		cfg.BaseURL = fmt.Sprintf("http://127.0.0.1:%d/v1", port)
+	}
+
+	if verbose {
+		fmt.Fprintf(os.Stderr, "Starting %s server for %s on port %d...\n", cfg.Provider, cfg.Model, port)
+	}
+
+	var serverCmd *exec.Cmd
+	switch cfg.Provider {
+	case "mlx":
+		serverCmd, err = llm.StartMlxServer(cfg.Model, port)
+	case "hypura":
+		serverCmd, err = llm.StartHypuraServer(cfg.Model, port)
+	default:
+		serverCmd, err = llm.StartLlamaServer(cfg.Model, port)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting server: %v\n", err)
+		os.Exit(1)
+	}
+
+	timeout := 30 * time.Minute
+	if cfg.Provider == "mlx" {
+		timeout = time.Hour
+	}
+
+	if cfg.Provider == "hypura" {
+		if err := llm.WaitForHypuraServer(cfg.BaseURL, timeout); err != nil {
+			llm.StopServer(serverCmd)
+			fmt.Fprintf(os.Stderr, "Server did not become ready: %v\n", err)
+			os.Exit(1)
+		}
+		if servedModel, err := llm.QueryHypuraModel(cfg.BaseURL); err == nil {
+			cfg.Model = servedModel
+		}
+	} else {
+		if err := llm.WaitForServer(cfg.BaseURL, timeout); err != nil {
+			llm.StopServer(serverCmd)
+			fmt.Fprintf(os.Stderr, "Server did not become ready: %v\n", err)
+			os.Exit(1)
+		}
+		if cfg.Provider == "llama.cpp" {
+			if servedModel, err := llm.QueryServedModel(cfg.BaseURL); err == nil {
+				cfg.Model = servedModel
+			}
+		}
+	}
+
+	actualURL, err := llm.RegisterSharedServer(&llm.ServerInfo{
+		Provider: cfg.Provider,
+		Model:    cfg.Model,
+		PID:      serverCmd.Process.Pid,
+		Port:     port,
+		BaseURL:  cfg.BaseURL,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error registering server: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.BaseURL = actualURL
+
+	if verbose {
+		fmt.Fprintln(os.Stderr, "Server ready")
+	}
+	return true
 }
 

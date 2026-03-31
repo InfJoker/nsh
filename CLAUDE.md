@@ -156,15 +156,6 @@ model = "claude-sonnet-4-6"
 - Shared server refcounting same as llama.cpp/MLX.
 - Tool calling: Hypura does not parse tool calls from model text output into structured `tool_calls` — needs the text tool parser (see TODO below).
 
-### Hypura Provider
-- **Apple Silicon only**: Distributes model tensors across GPU/RAM/NVMe for models that exceed physical memory.
-- Uses Ollama-native API (`/api/chat`, `/api/tags`) — NOT OpenAI-compatible `/v1/`.
-- `OllamaAPIProvider` in `internal/llm/ollama_api.go` handles NDJSON streaming.
-- Server lifecycle: `hypura serve <model.gguf> --host 127.0.0.1 --port <port>`.
-- Model specified as local GGUF file path (no HuggingFace auto-download).
-- Shared server refcounting same as llama.cpp/MLX.
-- Tool calling: Hypura does not parse tool calls from model text output into structured `tool_calls` — needs the text tool parser (see TODO below).
-
 ## Development Guidelines
 - **No hardcoded model catalogs.** Model availability changes frequently. Always query llmfit or ollama APIs at runtime.
 - **Interactive I/O in `internal/llm/`**: The `llm` package contains `RunOllamaSetup()` and `RunLlamaCppSetup()` which do interactive stdin/stdout. When called from the TUI, they must run via `tea.ExecProcess` (subprocess) to avoid conflicting with bubbletea's terminal control.

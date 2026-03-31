@@ -80,11 +80,7 @@ func extractSegments(command string, cfg *config.Config) []SegmentResult {
 		seen[cmd] = true
 
 		action := matchRules(cmd, cfg.AllRules())
-		isDangerous := cfg.IsDangerous(firstWord(cmd))
-		// Also check multi-word dangerous patterns
-		if !isDangerous {
-			isDangerous = cfg.IsDangerous(cmd)
-		}
+		isDangerous := cfg.IsDangerous(firstWord(cmd)) || cfg.IsDangerous(cmd)
 
 		segments = append(segments, SegmentResult{
 			Command:     cmd,
@@ -107,10 +103,7 @@ func fallbackSegments(command string, cfg *config.Config) []SegmentResult {
 		return nil
 	}
 	action := matchRules(cmd, cfg.AllRules())
-	isDangerous := cfg.IsDangerous(firstWord(cmd))
-	if !isDangerous {
-		isDangerous = cfg.IsDangerous(cmd)
-	}
+	isDangerous := cfg.IsDangerous(firstWord(cmd)) || cfg.IsDangerous(cmd)
 	return []SegmentResult{{
 		Command:     cmd,
 		Action:      action,

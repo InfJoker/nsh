@@ -152,7 +152,10 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, messages []Message, t
 			if len(msg.ToolCalls) > 0 {
 				var toolCalls []openai.ChatCompletionMessageToolCallUnionParam
 				for _, tc := range msg.ToolCalls {
-					argsJSON, _ := json.Marshal(tc.Arguments)
+					argsJSON, err := json.Marshal(tc.Arguments)
+					if err != nil {
+						argsJSON = []byte("{}")
+					}
 					toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallUnionParam{
 						OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
 							ID: tc.ID,

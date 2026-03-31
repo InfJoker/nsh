@@ -53,7 +53,10 @@ func (p *AnthropicProvider) Stream(ctx context.Context, messages []Message, tool
 				anthropic.NewTextBlock(msg.Content),
 			}
 			for _, tc := range msg.ToolCalls {
-				argsJSON, _ := json.Marshal(tc.Arguments)
+				argsJSON, err := json.Marshal(tc.Arguments)
+				if err != nil {
+					argsJSON = []byte("{}")
+				}
 				blocks = append(blocks, anthropic.ContentBlockParamOfRequestToolUseBlock(
 					tc.ID, json.RawMessage(argsJSON), tc.Name,
 				))
