@@ -86,18 +86,47 @@ Interactive TUI testing using `test/e2e/nsh-test.sh` — a Playwright-like CLI t
 **Viewing screenshots**: Use the Read tool on the PNG file path.
 
 ## Config
-- `~/.nsh/config.toml` — created on first run with empty provider (triggers setup)
-- `~/.nsh/data/` — history.json, projects.json, auth.json, learned_rules.toml
+- `~/.nsh/config.toml` — providers + presets format (see below)
+- `~/.nsh/data/` — history.json, projects.json, auth.json, learned_rules.toml, server.json, server.lock
+
+### Config Format (providers + presets)
+```toml
+preset = "light"                    # active preset
+
+[providers.anthropic]
+type = "anthropic"
+api_key = "sk-ant-..."             # or use env: ANTHROPIC_API_KEY
+
+[providers.local-mlx]
+type = "mlx"                       # native (shared server, ephemeral port)
+
+[providers.local-llama]
+type = "llama.cpp"                 # native (shared server, ephemeral port)
+
+[presets.light]
+provider = "local-mlx"
+model = "mlx-community/Qwen3.5-1B-MLX-4bit"
+
+[presets.cloud]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+```
+
+- **Providers** = infrastructure config (type, base_url, api_key)
+- **Presets** = model selection (references a provider by name)
+- `nsh --preset light` to select at launch, `nsh --preset` for interactive picker
+- `!presets` builtin to switch in TUI
 
 ## Supported Providers
 
 | Provider | Model selection | Runtime |
 |---|---|---|
-| `anthropic` | Fixed (claude-sonnet) | Anthropic API (requires `ANTHROPIC_API_KEY`) |
+| `anthropic` | Fixed (claude-sonnet-4-6) | Anthropic API (requires `ANTHROPIC_API_KEY`) |
 | `ollama` | Only shows locally-installed tool-capable models | Ollama daemon (must be running) |
-| `llama.cpp` | llmfit recommends for hardware → download → serve | llmfit + llama-server |
+| `llama.cpp` | User provides HF GGUF repo | llama-server (auto-downloads via `--hf-repo`) |
 | `copilot` | Fixed (not yet implemented) | GitHub Copilot OAuth |
-| `mlx` | llmfit recommends for Apple Silicon | mlx_lm.server (requires `pip3 install mlx-lm`) |
+| `mlx` | User provides HF MLX model | mlx_lm.server (requires `pip3 install mlx-lm`) |
+| `hypura` | User provides local GGUF path | Hypura server (Apple Silicon, models larger than RAM) |
 | `mock` | Fixed | Built-in (for development/testing) |
 
 ### Ollama Provider
@@ -106,16 +135,35 @@ Interactive TUI testing using `test/e2e/nsh-test.sh` — a Playwright-like CLI t
 - `!provider` builtin triggers interactive setup that shows tool-capable local models.
 
 ### llama.cpp Provider
-- **Smart local option**: llmfit handles hardware detection, model recommendation, downloading with optimal quantization, and serving.
-- Server lifecycle: `llmfit run <model> --server --port <port>` starts/stops with nsh.
+- Uses `llama-server --hf-repo` for auto-download from HuggingFace.
+- Server lifecycle managed by shared server system (`internal/llm/shared_server.go`).
 - Auto port: `FindFreePort()` binds `:0` for OS-assigned ephemeral port.
-- No name mapping: llmfit download name = serve name = API model name.
-- `internal/llm/llmfit_local.go` — runtime management (install, download, serve, port, wait).
+- `internal/llm/server.go` — server startup, process group kill, wait, query.
 
-### llmfit Integration (llama.cpp only)
-- Use `llmfit list --json` to query the model database, filter by `capabilities: ["tool_use"]` + `gguf_sources` (non-empty) + RAM fit.
-- Use `llmfit recommend --json` for hardware detection (`system.total_ram_gb`, `system.gpu_vram_gb`, `system.unified_memory`).
-- `llmfit` output format: `{"models": [...], "system": {...}}` for `recommend`; top-level array for `list`.
+### Shared Server System
+- Servers (llama.cpp, MLX, Hypura) are shared across nsh instances via flock-based reference counting.
+- `~/.nsh/data/server.json` stores PID, port, client PIDs.
+- `AcquireSharedServer` / `RegisterSharedServer` / `ReleaseSharedServer` in `shared_server.go`.
+- Dead client PIDs pruned on acquire (self-heals after crashes).
+- Process group kill via `Setpgid` + `Getpgid` ensures children are cleaned up.
+
+### Hypura Provider
+- **Apple Silicon only**: Distributes model tensors across GPU/RAM/NVMe for models that exceed physical memory.
+- Uses Ollama-native API (`/api/chat`, `/api/tags`) — NOT OpenAI-compatible `/v1/`.
+- `OllamaAPIProvider` in `internal/llm/ollama_api.go` handles NDJSON streaming.
+- Server lifecycle: `hypura serve <model.gguf> --host 127.0.0.1 --port <port>`.
+- Model specified as local GGUF file path (no HuggingFace auto-download).
+- Shared server refcounting same as llama.cpp/MLX.
+- Tool calling: Hypura does not parse tool calls from model text output into structured `tool_calls` — needs the text tool parser (see TODO below).
+
+### Hypura Provider
+- **Apple Silicon only**: Distributes model tensors across GPU/RAM/NVMe for models that exceed physical memory.
+- Uses Ollama-native API (`/api/chat`, `/api/tags`) — NOT OpenAI-compatible `/v1/`.
+- `OllamaAPIProvider` in `internal/llm/ollama_api.go` handles NDJSON streaming.
+- Server lifecycle: `hypura serve <model.gguf> --host 127.0.0.1 --port <port>`.
+- Model specified as local GGUF file path (no HuggingFace auto-download).
+- Shared server refcounting same as llama.cpp/MLX.
+- Tool calling: Hypura does not parse tool calls from model text output into structured `tool_calls` — needs the text tool parser (see TODO below).
 
 ## Development Guidelines
 - **No hardcoded model catalogs.** Model availability changes frequently. Always query llmfit or ollama APIs at runtime.

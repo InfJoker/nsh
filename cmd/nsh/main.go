@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -621,14 +622,16 @@ func runPresetPicker(cfg *config.Config) string {
 		isActive bool
 	}
 	var entries []entry
-	// Active first
 	for name, p := range presets {
-		if name == cfg.ActivePreset {
-			entries = append([]entry{{name, p, true}}, entries...)
-		} else {
-			entries = append(entries, entry{name, p, false})
-		}
+		entries = append(entries, entry{name, p, name == cfg.ActivePreset})
 	}
+	// Sort: active first, then alphabetical
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].isActive != entries[j].isActive {
+			return entries[i].isActive
+		}
+		return entries[i].name < entries[j].name
+	})
 
 	fmt.Println()
 	fmt.Println("  nsh — select a preset:")

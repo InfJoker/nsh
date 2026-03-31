@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -134,8 +135,9 @@ func (p *OllamaAPIProvider) Stream(ctx context.Context, messages []Message, tool
 		return nil, fmt.Errorf("posting to %s/api/chat: %w", p.baseURL, err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		resp.Body.Close()
-		return nil, fmt.Errorf("ollama API returned %d", resp.StatusCode)
+		return nil, fmt.Errorf("ollama API returned %d: %s", resp.StatusCode, string(errBody))
 	}
 
 	go func() {

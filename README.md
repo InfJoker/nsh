@@ -65,8 +65,6 @@ Prefix with `!` to skip the LLM and execute directly, with full terminal passthr
 > !git rebase -i HEAD~3
 ```
 
-![raw command](screenshots/raw-command.png)
-
 ### Non-interactive mode
 
 Run a single query from scripts or your existing shell:

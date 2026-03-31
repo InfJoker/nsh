@@ -893,8 +893,12 @@ func (m Model) renderPermissionPrompt() string {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(cmdStyle.Render("$ " + pp.command))
-	sb.WriteString("\n")
+
+	// Only show the command line if there's no active command card already displaying it
+	if m.activeCmd == nil {
+		sb.WriteString(cmdStyle.Render("$ " + pp.command))
+		sb.WriteString("\n")
+	}
 
 	if pp.dangerous {
 		warn := lipgloss.NewStyle().Foreground(m.theme.Danger).Render("  ⚠ DANGEROUS COMMAND")

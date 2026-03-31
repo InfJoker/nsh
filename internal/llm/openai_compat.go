@@ -190,8 +190,9 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, messages []Message, t
 	}
 
 	params := openai.ChatCompletionNewParams{
-		Model:    p.model,
-		Messages: oaiMsgs,
+		Model:     p.model,
+		Messages:  oaiMsgs,
+		MaxTokens: openai.Int(4096),
 	}
 
 	if len(oaiTools) > 0 {
@@ -204,7 +205,7 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, messages []Message, t
 		stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 
 		acc := openai.ChatCompletionAccumulator{}
-		emittedToolCalls := make(map[int]bool)
+		emittedToolCalls := make(map[string]bool) // keyed by tool call ID
 
 		for stream.Next() {
 			chunk := stream.Current()
@@ -224,9 +225,9 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, messages []Message, t
 
 			// Detect completed tool calls via accumulator
 			if tool, ok := acc.JustFinishedToolCall(); ok {
-				if !emittedToolCalls[len(emittedToolCalls)] {
+				if !emittedToolCalls[tool.ID] {
 					if tc := parseToolCall(tool.ID, tool.Name, tool.Arguments); tc != nil {
-						emittedToolCalls[len(emittedToolCalls)] = true
+						emittedToolCalls[tool.ID] = true
 						select {
 						case ch <- StreamEvent{Type: EventToolCall, ToolCall: tc}:
 						case <-ctx.Done():
@@ -249,12 +250,11 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, messages []Message, t
 			return
 		}
 
-		// Ollama may send entire tool calls in a single chunk, which the
-		// accumulator's JustFinishedToolCall() won't detect. After the
-		// stream ends, emit any accumulated tool calls we haven't sent yet.
+		// Some servers (e.g. Ollama) send entire tool calls in a single chunk,
+		// which JustFinishedToolCall() won't detect. Emit any we missed.
 		if len(acc.Choices) > 0 {
-			for i, tc := range acc.Choices[0].Message.ToolCalls {
-				if !emittedToolCalls[i] && tc.Function.Name != "" {
+			for _, tc := range acc.Choices[0].Message.ToolCalls {
+				if !emittedToolCalls[tc.ID] && tc.Function.Name != "" {
 					if parsed := parseToolCall(tc.ID, tc.Function.Name, tc.Function.Arguments); parsed != nil {
 						select {
 						case ch <- StreamEvent{Type: EventToolCall, ToolCall: parsed}:
