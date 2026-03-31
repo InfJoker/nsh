@@ -95,7 +95,7 @@ nsh supports several LLM backends:
 | `ollama` | Ollama running locally with a pulled model |
 | `llama.cpp` | HuggingFace GGUF repo (auto-downloads) |
 | `mlx` | Apple Silicon + `pip3 install mlx-lm` |
-| `hypura` | Apple Silicon + local GGUF file (for models larger than RAM) |
+| `hypura` | Apple Silicon + local GGUF file (distributes tensors across GPU/RAM/NVMe) |
 
 ### Example config
 
