@@ -126,6 +126,7 @@ model = "claude-sonnet-4-6"
 | `llama.cpp` | User provides HF GGUF repo | llama-server (auto-downloads via `--hf-repo`) |
 | `copilot` | Fixed (not yet implemented) | GitHub Copilot OAuth |
 | `mlx` | User provides HF MLX model | mlx_lm.server (requires `pip3 install mlx-lm`) |
+| `apfel` | Fixed (apple-foundationmodel) | apfel server (macOS 26+, Apple Silicon) |
 | `hypura` | User provides local GGUF path | Hypura server (Apple Silicon, models larger than RAM) |
 | `mock` | Fixed | Built-in (for development/testing) |
 

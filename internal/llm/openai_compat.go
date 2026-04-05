@@ -33,20 +33,37 @@ func oomUserError() error {
 // OpenAICompatProvider implements LLMClient for any OpenAI-compatible API.
 // Used by Ollama now; reusable for OpenRouter, Groq, etc.
 type OpenAICompatProvider struct {
-	client openai.Client
-	model  string
+	client              openai.Client
+	model               string
+	requireTrailingUser bool // apfel requires last message to be role:"user"
 }
 
 // NewOpenAICompatProvider creates a provider targeting any OpenAI-compatible endpoint.
-func NewOpenAICompatProvider(model, baseURL, apiKey string) *OpenAICompatProvider {
+func NewOpenAICompatProvider(model, baseURL, apiKey string, opts ...OpenAICompatOption) *OpenAICompatProvider {
 	client := openai.NewClient(
 		option.WithBaseURL(baseURL),
 		option.WithAPIKey(apiKey),
 		option.WithMiddleware(sseFilterMiddleware),
 	)
-	return &OpenAICompatProvider{
+	p := &OpenAICompatProvider{
 		client: client,
 		model:  model,
+	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
+
+// OpenAICompatOption configures an OpenAICompatProvider.
+type OpenAICompatOption func(*OpenAICompatProvider)
+
+// WithTrailingUser ensures a user message follows tool results.
+// Required by apfel (Apple Foundation Model) which rejects requests
+// where the last message has role "tool".
+func WithTrailingUser() OpenAICompatOption {
+	return func(p *OpenAICompatProvider) {
+		p.requireTrailingUser = true
 	}
 }
 
@@ -179,6 +196,14 @@ func (p *OpenAICompatProvider) Stream(ctx context.Context, messages []Message, t
 			}
 		case "tool":
 			oaiMsgs = append(oaiMsgs, openai.ToolMessage(msg.Content, msg.ToolCallID))
+		}
+	}
+
+	// apfel requires last message to be role:"user"
+	if p.requireTrailingUser && len(oaiMsgs) > 0 {
+		last := oaiMsgs[len(oaiMsgs)-1]
+		if last.OfTool != nil {
+			oaiMsgs = append(oaiMsgs, openai.UserMessage("Process the tool results above and respond to the user."))
 		}
 	}
 

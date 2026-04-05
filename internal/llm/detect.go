@@ -50,6 +50,12 @@ func DetectAvailableProviders() []ProviderInfo {
 			Model:     "", // determined during interactive setup
 		},
 		{
+			Name:      "apfel",
+			Available: ApfelInstalled(),
+			Hint:      hintwhen(!ApfelInstalled(), "brew install Arthur-Ficial/tap/apfel"),
+			Model:     "apple-foundationmodel",
+		},
+		{
 			Name:      "hypura",
 			Available: HypuraInstalled(),
 			Hint:      hintwhen(!HypuraInstalled(), "cargo build --release (https://github.com/t8/hypura)"),

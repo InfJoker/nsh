@@ -320,8 +320,12 @@ func runProviderSetup(cfg *config.Config) {
 	if hasOllama {
 		fmt.Println("  Detected Ollama at localhost:11434")
 	}
+	hasApfel := llm.ApfelInstalled()
 	if hasHypura {
 		fmt.Println("  Detected Hypura on PATH")
+	}
+	if hasApfel {
+		fmt.Println("  Detected apfel on PATH")
 	}
 
 	fmt.Println()
@@ -332,14 +336,17 @@ func runProviderSetup(cfg *config.Config) {
 	fmt.Println("  [3] ollama     - Ollama (local, uses already-installed models)")
 	fmt.Println("  [4] llama.cpp  - llama.cpp (local, auto-downloads from HuggingFace)")
 	fmt.Println("  [5] mlx        - MLX on Apple Silicon (local, auto-downloads best model)")
-	fmt.Println("  [6] hypura     - Hypura on Apple Silicon (local, runs models larger than RAM)")
+	fmt.Println("  [6] apfel      - Apple on-device model (macOS 26+, Apple Silicon)")
+	fmt.Println("  [7] hypura     - Hypura on Apple Silicon (local, runs models larger than RAM)")
 	fmt.Println()
 
 	reader := bufio.NewReader(os.Stdin)
 
 	// Default suggestion
 	defaultChoice := "1"
-	if hasOllama && !hasAnthropicKey {
+	if hasApfel && !hasAnthropicKey {
+		defaultChoice = "6"
+	} else if hasOllama && !hasAnthropicKey {
 		defaultChoice = "3"
 	} else if hasCopilotToken && !hasAnthropicKey {
 		defaultChoice = "2"
@@ -399,7 +406,11 @@ func runProviderSetup(cfg *config.Config) {
 		model = result.Model
 		// baseURL will be set at startup when the server starts
 
-	case "6", "hypura":
+	case "6", "apfel":
+		provider = "apfel"
+		model = "apple-foundationmodel"
+
+	case "7", "hypura":
 		provider = "hypura"
 		result, err := llm.RunHypuraSetup()
 		if err != nil {
@@ -509,11 +520,11 @@ func runPresetPicker(cfg *config.Config) string {
 	return ""
 }
 
-// ensureLocalServer acquires or starts a shared server for local providers (mlx, llama.cpp, hypura).
+// ensureLocalServer acquires or starts a shared server for local providers (mlx, llama.cpp, apfel, hypura).
 // Modifies cfg.BaseURL and cfg.Model in place. Returns true if a shared server is in use.
 // When verbose is true, prints status messages to stderr.
 func ensureLocalServer(cfg *config.Config, verbose bool) bool {
-	if cfg.Provider != "mlx" && cfg.Provider != "llama.cpp" && cfg.Provider != "hypura" {
+	if cfg.Provider != "mlx" && cfg.Provider != "llama.cpp" && cfg.Provider != "hypura" && cfg.Provider != "apfel" {
 		return false
 	}
 
@@ -553,6 +564,8 @@ func ensureLocalServer(cfg *config.Config, verbose bool) bool {
 		serverCmd, err = llm.StartMlxServer(cfg.Model, port)
 	case "hypura":
 		serverCmd, err = llm.StartHypuraServer(cfg.Model, port)
+	case "apfel":
+		serverCmd, err = llm.StartApfelServer(port)
 	default:
 		serverCmd, err = llm.StartLlamaServer(cfg.Model, port)
 	}
@@ -564,6 +577,8 @@ func ensureLocalServer(cfg *config.Config, verbose bool) bool {
 	timeout := 30 * time.Minute
 	if cfg.Provider == "mlx" {
 		timeout = time.Hour
+	} else if cfg.Provider == "apfel" {
+		timeout = 30 * time.Second
 	}
 
 	if cfg.Provider == "hypura" {

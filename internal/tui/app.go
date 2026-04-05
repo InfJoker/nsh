@@ -347,6 +347,8 @@ func acquireOrStartServer(provider, model string) localServerReadyMsg {
 		serverCmd, err = llm.StartMlxServer(model, port)
 	case "hypura":
 		serverCmd, err = llm.StartHypuraServer(model, port)
+	case "apfel":
+		serverCmd, err = llm.StartApfelServer(port)
 	default:
 		serverCmd, err = llm.StartLlamaServer(model, port)
 	}
@@ -357,6 +359,8 @@ func acquireOrStartServer(provider, model string) localServerReadyMsg {
 	timeout := 30 * time.Minute
 	if provider == "mlx" {
 		timeout = time.Hour
+	} else if provider == "apfel" {
+		timeout = 30 * time.Second
 	}
 
 	if provider == "hypura" {
@@ -504,7 +508,7 @@ func (m Model) switchToPreset(name string) (tea.Model, tea.Cmd) {
 	baseURL := prov.BaseURL
 
 	// For local providers, need to start/acquire server
-	if provType == "mlx" || provType == "llama.cpp" || provType == "hypura" {
+	if provType == "mlx" || provType == "llama.cpp" || provType == "hypura" || provType == "apfel" {
 		infoStyle := lipgloss.NewStyle().Foreground(m.theme.Muted)
 		m.entries = append(m.entries, conversationEntry{
 			content: infoStyle.Render(fmt.Sprintf("Switching to %s (%s/%s)...", name, provType, model)),
@@ -561,6 +565,18 @@ func (m Model) handleProviderSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.execGuard = true
 			return m, launchHypuraSetup()
 		}
+		// Apfel — no setup needed, start server directly
+		if sel.Name == "apfel" {
+			m.providerSelect = nil
+			infoStyle := lipgloss.NewStyle().Foreground(m.theme.Muted)
+			m.entries = append(m.entries, conversationEntry{
+				content: infoStyle.Render("Starting apfel server..."),
+			})
+			m.serverStarting = true
+			return m, func() tea.Msg {
+				return acquireOrStartServer("apfel", "apple-foundationmodel")
+			}
+		}
 		if !sel.Available {
 			return m, nil
 		}
@@ -583,7 +599,7 @@ func (m Model) applyProviderSwitch(name, model, baseURL string) (tea.Model, tea.
 		return m, nil
 	}
 	// Release previous shared server if switching to a non-local provider
-	if name != "llama.cpp" && name != "mlx" && name != "hypura" {
+	if name != "llama.cpp" && name != "mlx" && name != "hypura" && name != "apfel" {
 		llm.ReleaseSharedServer()
 	}
 	m.client = newClient
